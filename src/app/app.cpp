@@ -1,6 +1,7 @@
 #include "app.h"
 #include "../drivers/persist.h"
 #include "../drivers/dxl1_bus.h"
+#include "../drivers/dxl2_bus.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -40,7 +41,7 @@ int clampInt(int v, int lo, int hi) {
 // Construction
 // ---------------------------------------------------------------------------
 
-App::App(AppState& state, UnitEncoder& encoder, OledUi& ui,
+App::App(AppState& state, IEncoder& encoder, OledUi& ui,
          IServoBus* bus, MidiEngine& midi)
     : _app(state), _encoder(encoder), _ui(ui), _bus(bus), _midi(midi) {}
 
@@ -61,6 +62,7 @@ void App::tick() {
   handleInput();
   updateFeedback();
   if (_app.midi.active) tickMidi();
+  tickHostInput();  // always drain host events, even outside MIDI mode
 
   // Lazy persist write — only when something changed, not every frame
   if (_persistDirty) {
@@ -229,6 +231,9 @@ const uint32_t* App::activeBaudTable(int& count) const {
     case BusProtocol::DXL1:
       count = DXL1_BAUD_CNT;
       return DXL1_BAUDS;
+    case BusProtocol::DXL2:
+      count = DXL2_BAUD_CNT;
+      return DXL2_BAUDS;
     case BusProtocol::ST3215:
     default:
       count = BAUD_TABLE_COUNT;
@@ -336,8 +341,9 @@ void App::scanBusWithUi() {
 bool App::scanBusAtBaud(uint32_t baud) {
   _bus->setBaud(baud);
   _app.scanAllCurrentBaud = baud;
+  int baudCnt; activeBaudTable(baudCnt);
   if (_app.oledOk)
-    _ui.drawScanAllProgress(baud, _app.scanAllBaudStep, BAUD_TABLE_COUNT,
+    _ui.drawScanAllProgress(baud, _app.scanAllBaudStep, baudCnt,
                             0, _app.servoCount, 253);
 
   unsigned long pressStart = 0;
@@ -353,7 +359,7 @@ bool App::scanBusAtBaud(uint32_t baud) {
         _app.ids[_app.servoCount++] = (uint8_t)id;
     }
     if (_app.oledOk)
-      _ui.drawScanAllProgress(baud, _app.scanAllBaudStep, BAUD_TABLE_COUNT,
+      _ui.drawScanAllProgress(baud, _app.scanAllBaudStep, baudCnt,
                               id, _app.servoCount, 253);
 
     // Poll encoder for long-press abort
@@ -709,7 +715,166 @@ void App::doMidiPanic() {
   }
 }
 
-// Scale pos within [minL..maxL] to 0..127, optionally inverted
+// ---------------------------------------------------------------------------
+// USB Host input routing
+// ---------------------------------------------------------------------------
+
+// Scale a raw axis value through the binding's min/max/deadzone to 0..127
+static int16_t axisToCC(int16_t raw, int16_t axMin, int16_t axMax, int16_t dead) {
+  // Apply deadzone
+  if (raw > -dead && raw < dead) raw = 0;
+  raw = (raw < axMin) ? axMin : (raw > axMax) ? axMax : raw;
+  // Map axMin..axMax → 0..127
+  long range = (long)axMax - (long)axMin;
+  if (range == 0) return 64;
+  long shifted = (long)raw - (long)axMin;
+  return (int16_t)((shifted * 127L) / range);
+}
+
+void App::applyHostValue(UsbHostBinding& b, int16_t rawVal) {
+  // Convert raw source value to 0..127 CC range
+  uint8_t ccVal;
+  if (b.srcType == UsbHostSrcType::HidAxis) {
+    int16_t scaled = axisToCC(rawVal, b.axisMin, b.axisMax, b.deadzone);
+    ccVal = (uint8_t)clampInt((int)scaled, 0, 127);
+  } else if (b.srcType == UsbHostSrcType::HidButton) {
+    // Button: 0 → min position, 1 → max position
+    ccVal = (rawVal != 0) ? 127 : 0;
+  } else {
+    // MidiCC or MidiNote — already 0..127
+    ccVal = (uint8_t)clampInt((int)rawVal, 0, 127);
+  }
+
+  b.lastRecv  = (int8_t)ccVal;
+  b.pendingVal = (int8_t)ccVal;
+  b.rxFlash   = MIDI_FLASH_FRAMES;
+}
+
+void App::tickHostInput() {
+  // Update device presence status from host engine
+  _app.usbHost.devicePresent = usbHost.hasDevice();
+  if (usbHost.hasDevice())
+    strncpy(_app.usbHost.deviceName, usbHost.deviceName(0), 11);
+  else
+    strncpy(_app.usbHost.deviceName, "---", 11);
+
+  // Drain event ring buffer from Core 1
+  HostInputEvent events[HOST_EVT_RING_SIZE];
+  int n = usbHost.drainEvents(events, HOST_EVT_RING_SIZE);
+
+  for (int ei = 0; ei < n; ++ei) {
+    const HostInputEvent& evt = events[ei];
+
+    // Log to MIDI monitor (shows host events alongside MIDI events)
+    if (_app.midi.active || _app.screen == ScreenId::MidiRun ||
+        _app.screen == ScreenId::MidiSetup) {
+      MidiLogEntry entry;
+      entry.valid   = true;
+      entry.channel = evt.channel;
+      if (evt.type == HostEvtType::MidiCC) {
+        entry.type  = MidiMsgType::CC;
+        entry.byte1 = evt.index;
+        entry.byte2 = (uint8_t)clampInt(evt.value, 0, 127);
+      } else if (evt.type == HostEvtType::MidiNoteOn) {
+        entry.type  = MidiMsgType::NoteOn;
+        entry.byte1 = evt.index;
+        entry.byte2 = (uint8_t)clampInt(evt.value, 0, 127);
+      } else if (evt.type == HostEvtType::MidiNoteOff) {
+        entry.type  = MidiMsgType::NoteOff;
+        entry.byte1 = evt.index;
+        entry.byte2 = 0;
+      } else {
+        entry.type  = MidiMsgType::Other;
+        entry.byte1 = evt.index;
+        entry.byte2 = (uint8_t)((evt.value >> 8) & 0xFF);
+        entry.int14 = evt.value;
+      }
+      MidiState& m = _app.midi;
+      m.log[m.logHead % MIDI_LOG_SIZE] = entry;
+      m.logHead = (m.logHead + 1) % MIDI_LOG_SIZE;
+    }
+
+    // Match event against host bindings
+    for (uint8_t bi = 0; bi < _app.usbHost.bindingCount; ++bi) {
+      UsbHostBinding& b = _app.usbHost.bindings[bi];
+      if (b.devIndex != evt.devIndex) continue;
+
+      bool match = false;
+      int16_t rawVal = evt.value;
+
+      switch (evt.type) {
+        case HostEvtType::MidiCC:
+          match = (b.srcType == UsbHostSrcType::MidiCC &&
+                   b.srcIndex == evt.index &&
+                   b.srcChannel == evt.channel);
+          break;
+        case HostEvtType::MidiNoteOn:
+        case HostEvtType::MidiNoteOff:
+          match = (b.srcType == UsbHostSrcType::MidiNote &&
+                   b.srcIndex == evt.index &&
+                   b.srcChannel == evt.channel);
+          rawVal = (evt.type == HostEvtType::MidiNoteOn) ? evt.value : 0;
+          break;
+        case HostEvtType::HidAxis:
+          match = (b.srcType == UsbHostSrcType::HidAxis &&
+                   b.srcIndex == evt.index);
+          break;
+        case HostEvtType::HidButton:
+          match = (b.srcType == UsbHostSrcType::HidButton &&
+                   b.srcIndex == evt.index);
+          break;
+        default: break;
+      }
+
+      if (match) applyHostValue(b, rawVal);
+    }
+  }
+
+  // Rate-limited flush — apply pending values to servos/globals
+  uint32_t now = millis();
+  if (now < _app.usbHost.rxNextMs) return;
+  _app.usbHost.rxNextMs = now + MIDI_RX_INTERVAL_MS;
+
+  for (uint8_t bi = 0; bi < _app.usbHost.bindingCount; ++bi) {
+    UsbHostBinding& b = _app.usbHost.bindings[bi];
+    if (b.pendingVal < 0) continue;
+    uint8_t val     = (uint8_t)b.pendingVal;
+    b.pendingVal    = -1;
+
+    if (b.rxFlash > 0) --b.rxFlash;
+
+    // Same sink dispatch as tickMidi()
+    if (b.servoId == MIDI_GLOBAL_SPEED) {
+      _app.speed = (int)map((long)val, 0, 127, 0, 4095);
+      markDirty();
+    } else if (b.servoId == MIDI_GLOBAL_ACC) {
+      _app.acc = (int)map((long)val, 0, 127, 0, 254);
+      markDirty();
+    } else if (b.servoId == MIDI_GLOBAL_SMOOTH) {
+      for (uint8_t s = 0; s < _app.midi.bindingCount; ++s)
+        _app.midi.bindings[s].smoothing = val;
+    } else {
+      // Invert if needed, then scale CC → position
+      uint8_t c = b.inverted ? (uint8_t)(127 - val) : val;
+      int rawTarget = ccToPos(c, b.minLimit, b.maxLimit);
+
+      // IIR smoothing
+      int finalTarget;
+      if (b.smoothing == 0) {
+        finalTarget = rawTarget;
+        b.smoothPos = (float)rawTarget;
+      } else {
+        if (b.smoothPos < 0.0f) b.smoothPos = (float)rawTarget;
+        float alpha = (128.0f - (float)b.smoothing) / 128.0f;
+        b.smoothPos = alpha * (float)rawTarget + (1.0f - alpha) * b.smoothPos;
+        finalTarget = clampInt((int)(b.smoothPos + 0.5f), b.minLimit, b.maxLimit);
+      }
+      _bus->setPosition(b.servoId, finalTarget, _app.speed, _app.acc);
+    }
+  }
+}
+
+
 uint8_t App::posToCC(int pos, int minL, int maxL, bool inverted) {
   if (minL >= maxL) return 64;
   pos = clampInt(pos, minL, maxL);
@@ -763,14 +928,35 @@ void App::handleHomeInput(int delta, bool shortPress, bool longPress) {
   switch (_app.menuIndex) {
     case 0: enterScreen(ScreenId::ScanBaudSelect, _app.scanBaudIndex, false); break;
     case 1: enterScreen(ScreenId::SelectServo, _app.activeIndex, false);       break;
-    case 2: enterScreen(ScreenId::LiveControl, 1, false);                      break;
+    case 2:
+      // DXL2: always start Live Control with torque OFF — the XH/XM series
+      // locks EEPROM when torque is on, and it's safer to require the user
+      // to explicitly enable it.
+      if (_app.protocol == BusProtocol::DXL2 && hasActiveServo()) {
+        _app.torqueEnabled = false;
+        _bus->torqueEnable(activeServoId(), false);
+      }
+      enterScreen(ScreenId::LiveControl, 1, false);
+      break;
     case 3:
       _servoStatusByte = -1;
       _servoLoadPct    = 0;
       _servoCurrentMa  = -1;
       enterScreen(ScreenId::ServoInfo, 0, false);
       break;
-    case 4: enterScreen(ScreenId::ConfigMenu, 0, false);                       break;
+    case 4:
+      // DXL2: torque must be OFF to write EEPROM — do it automatically and
+      // show a brief notice so the user knows why the servo goes limp.
+      if (_app.protocol == BusProtocol::DXL2 && hasActiveServo()) {
+        if (_app.torqueEnabled) {
+          _app.torqueEnabled = false;
+          _bus->torqueEnable(activeServoId(), false);
+          if (_app.oledOk) _ui.splash("Configure", "Torque disabled", "req. for DXL2");
+          delay(1200);
+        }
+      }
+      enterScreen(ScreenId::ConfigMenu, 0, false);
+      break;
     case 5: enterScreen(ScreenId::ConfirmSave, 0, false);                      break;
     case 6:
       // Enter MIDI mode: rebuild bindings then go to Setup
@@ -952,7 +1138,8 @@ void App::handleConfigInput(int delta, bool shortPress, bool longPress) {
     case 4: { int v = clampInt(_app.cfg.centerOffset + delta * 4, -2047, 2047);
               if (v != _app.cfg.centerOffset) { _app.cfg.centerOffset = v; changed = true; } break; }
     case 5: break; // handled via ModeWarn
-    case 6: { int v = clampInt(_app.cfg.baudIndex + delta, 0, BAUD_TABLE_COUNT - 1);
+    case 6: { int bc; activeBaudTable(bc);
+              int v = clampInt(_app.cfg.baudIndex + delta, 0, bc - 1);
               if (v != _app.cfg.baudIndex) { _app.cfg.baudIndex = v; changed = true; } break; }
   }
   if (changed) _app.cfg.dirty = true;
@@ -1152,8 +1339,8 @@ void App::handleSelectProtocolInput(int delta, bool shortPress, bool longPress) 
       // Set default baud for new protocol and prompt a scan
       int cnt; const uint32_t* tbl = activeBaudTable(cnt);
       _app.scanBaudIndex = 0;
-      // For DXL1 default is index 2 (57600)
       if (chosen == BusProtocol::DXL1) _app.scanBaudIndex = DXL1_DEFAULT_BAUD_IDX;
+      if (chosen == BusProtocol::DXL2) _app.scanBaudIndex = DXL2_DEFAULT_BAUD_IDX;
       _bus->setBaud(tbl[_app.scanBaudIndex]);
       if (_app.oledOk)
         _ui.splash("Protocol", _bus->protocolName(), "Scan needed");
@@ -1194,17 +1381,20 @@ void App::render() {
                    hasActiveServo() ? "Short=enter" : "No servo");
       break;
     case ScreenId::Scan:
-      _ui.drawScanProgress(BAUD_TABLE[_app.scanBaudIndex],
+    { int cnt; const uint32_t* tbl = activeBaudTable(cnt);
+      _ui.drawScanProgress(tbl[clampInt(_app.scanBaudIndex, 0, cnt-1)],
                            _app.lastPingId, _app.servoCount, 253);
-      break;
+    } break;
     case ScreenId::ScanBaudSelect:
-      _ui.drawScanBaudSelect(_app.menuIndex);
-      break;
+    { int cnt; const uint32_t* tbl = activeBaudTable(cnt);
+      _ui.drawScanBaudSelect(_app.menuIndex, tbl, cnt);
+    } break;
     case ScreenId::ScanAllBaud:
+    { int cnt; activeBaudTable(cnt);
       _ui.drawScanAllProgress(_app.scanAllCurrentBaud,
-                              _app.scanAllBaudStep, BAUD_TABLE_COUNT,
+                              _app.scanAllBaudStep, cnt,
                               _app.lastPingId, _app.servoCount, 253);
-      break;
+    } break;
     case ScreenId::SelectServo:
       _ui.drawSelectServo(_app.ids, _app.servoCount, _app.activeIndex);
       break;
@@ -1224,21 +1414,25 @@ void App::render() {
                         _app.menuIndex);
       break;
     case ScreenId::ConfigMenu:
+    { int bc; const uint32_t* bt = activeBaudTable(bc);
       _ui.drawConfigMenu(activeServoId(),
                          _app.cfg.servoId,
                          _app.cfg.minLimit, _app.cfg.maxLimit,
                          _app.cfg.torqueLimit, _app.cfg.centerOffset,
                          _app.cfg.mode, _app.cfg.baudIndex,
-                         _app.cfg.dirty, _app.menuIndex, _app.editing);
-      break;
+                         _app.cfg.dirty, _app.menuIndex, _app.editing,
+                         bt, bc);
+    } break;
     case ScreenId::ConfirmSave:
+    { int bc; const uint32_t* bt = activeBaudTable(bc);
       _ui.drawConfirmSave(activeServoId(),
                           _app.cfg.servoId,
                           _app.cfg.minLimit, _app.cfg.maxLimit,
                           _app.cfg.torqueLimit, _app.cfg.centerOffset,
                           _app.cfg.mode, _app.cfg.baudIndex,
-                          _app.cfg.dirty, _app.menuIndex);
-      break;
+                          _app.cfg.dirty, _app.menuIndex,
+                          bt, bc);
+    } break;
     case ScreenId::SaveResult:
       _ui.drawSaveResult(_app.saveOk, _app.saveMessage);
       break;
@@ -1315,9 +1509,15 @@ bool App::saveStagedConfig() {
       _app.saveMessage[sizeof(_app.saveMessage)-1] = '\0';
       return false;
     }
-    delay(50);
+    delay(200); // EEPROM write + servo reinit takes up to ~150ms
     _app.ids[_app.activeIndex] = newId;
-    if (!_bus->ping(newId)) {
+    // Retry ping a few times — servo may still be reinitialising
+    bool found = false;
+    for (int attempt = 0; attempt < 5 && !found; ++attempt) {
+      found = _bus->ping(newId);
+      if (!found) delay(50);
+    }
+    if (!found) {
       strncpy(_app.saveMessage, "New ID not found", sizeof(_app.saveMessage));
       _app.saveMessage[sizeof(_app.saveMessage)-1] = '\0';
       return false;
@@ -1343,10 +1543,17 @@ bool App::saveStagedConfig() {
     return failWith("Baud write failed");
 
   _app.cfg.dirty = false;
-  if (_app.cfg.baudIndex != 0)
-    strncpy(_app.saveMessage, "Saved! Rescan needed", sizeof(_app.saveMessage));
+  // If baud changed: update scanBaudIndex so next scan uses the new baud,
+  // and update the bus so it can still talk to the servo at its new rate.
+  int cnt; const uint32_t* tbl = activeBaudTable(cnt);
+  uint32_t savedBaud = tbl[clampInt(_app.cfg.baudIndex, 0, cnt-1)];
+  if (savedBaud != _bus->currentBaud()) {
+    _app.scanBaudIndex = _app.cfg.baudIndex; // track new baud for next scan
+    _bus->setBaud(savedBaud);                // switch now so servo stays reachable
+    strncpy(_app.saveMessage, "Saved! Baud changed", sizeof(_app.saveMessage));
+  }
   else
-    strncpy(_app.saveMessage, "Saved + locked", sizeof(_app.saveMessage));
+    strncpy(_app.saveMessage, "Saved OK", sizeof(_app.saveMessage));
   _app.saveMessage[sizeof(_app.saveMessage)-1] = '\0';
 
   loadActiveServoRuntime();

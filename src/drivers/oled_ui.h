@@ -1,10 +1,26 @@
 #pragma once
 #include <Arduino.h>
 #include <Adafruit_GFX.h>
-#include <Adafruit_SH110X.h>
+#include "../config.h"          // must come before display includes for DISPLAY_xxx
 #include "../model/servo_model.h"
-// PersistDiag forward declared here to avoid circular include;
-// persist.h is included in oled_ui.cpp
+
+// Compile-time display backend selection driven by config.h
+#if defined(DISPLAY_SSD1306)
+  #include <Adafruit_SSD1306.h>
+  // SSD1306: constructor is (width, height, wire*, reset_pin)
+  #define _OLED_CLASS       Adafruit_SSD1306
+  #define _OLED_COLOR_ON    SSD1306_WHITE
+  #define _OLED_COLOR_OFF   SSD1306_BLACK
+  #define _OLED_CTOR(w,h,wire)  Adafruit_SSD1306((w), (h), (wire), -1)
+#else
+  // Default: SH1107 (M5Stack 1.3" OLED, Pico Grove config)
+  #include <Adafruit_SH110X.h>
+  #define _OLED_CLASS       Adafruit_SH1107
+  #define _OLED_COLOR_ON    SH110X_WHITE
+  #define _OLED_COLOR_OFF   SH110X_BLACK
+  #define _OLED_CTOR(w,h,wire)  Adafruit_SH1107((w), (h), (wire))
+#endif
+
 struct PersistDiag;
 
 class OledUi {
@@ -57,7 +73,9 @@ public:
                       int baudIndex,
                       bool dirty,
                       int selected,
-                      bool editing);
+                      bool editing,
+                      const uint32_t* baudTable,
+                      int baudCount);
 
   void drawConfirmSave(uint8_t servoId,
                        uint8_t stagedId,
@@ -68,7 +86,9 @@ public:
                        int mode,
                        int baudIndex,
                        bool dirty,
-                       int selected);
+                       int selected,
+                       const uint32_t* baudTable,
+                       int baudCount);
 
   void drawSaveResult(bool ok, const char* message);
 
@@ -77,7 +97,7 @@ public:
                         int foundCount,
                         int totalIds);
 
-  void drawScanBaudSelect(int selected);
+  void drawScanBaudSelect(int selected, const uint32_t* baudTable, int baudCount);
 
   void drawScanAllProgress(uint32_t currentBaud,
                            int baudStep,
@@ -113,9 +133,9 @@ public:
                    uint8_t logHead);
 
 private:
-  Adafruit_SH1107 _display;
+  _OLED_CLASS _display;
   uint8_t _addr;
-  int _rotation = 1;
+  int _rotation = HW::OLED_ROTATION;
 
   void header(const char* title);
   void headerWithRight(const char* title, const char* rightText);

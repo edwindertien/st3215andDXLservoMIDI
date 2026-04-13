@@ -26,6 +26,7 @@ public:
 
   // Change baud rate (used during Scan All to try different rates).
   virtual void setBaud(uint32_t baud) = 0;
+  virtual uint32_t currentBaud() const = 0;
 
   // --- Discovery ---
   virtual bool ping(uint8_t id) = 0;

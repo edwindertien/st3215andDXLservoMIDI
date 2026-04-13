@@ -4,10 +4,12 @@ UnitEncoder::UnitEncoder(TwoWire& wire, uint8_t addr)
     : _wire(wire), _addr(addr) {}
 
 bool UnitEncoder::begin(uint8_t sdaPin, uint8_t sclPin, uint32_t freqHz) {
-  _wire.setSDA(sdaPin);
-  _wire.setSCL(sclPin);
-  _wire.begin();
-  _wire.setClock(freqHz);
+  // Wire bus pins/clock are already configured by main.cpp setup() before
+  // begin() is called.  We intentionally do NOT call setSDA/setSCL/begin/
+  // setClock here — doing so would overwrite the bus configuration and break
+  // any other peripheral (e.g. the OLED) sharing the same Wire instance.
+  // Arguments kept for API compatibility.
+  (void)sdaPin; (void)sclPin; (void)freqHz;
 
   _wire.beginTransmission(_addr);
   if (_wire.endTransmission() != 0) return false;
@@ -155,8 +157,19 @@ bool UnitEncoder::isPressed() const {
 
 void UnitEncoder::clearEvents() {
   _shortPressEvent = false;
-  _longPressEvent = false;
+  _longPressEvent  = false;
   _stepAccumulator = 0;
+  _pressStartMs           = 0;
+  _longPressFired         = false;
+  _lastDebounceMs         = millis();
+  if (!_stableButton) {
+    _stableButton            = false;
+    _lastRawButton           = false;
+    _waitForReleaseAfterLong = false;
+  } else {
+    // Button still held after long press — swallow the upcoming release
+    _waitForReleaseAfterLong = true;
+  }
 }
 
 void UnitEncoder::setLedColor(uint8_t index, uint32_t color) {

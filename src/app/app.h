@@ -1,14 +1,15 @@
 #pragma once
 #include "../app_state.h"
-#include "../drivers/encoder_unit.h"
+#include "../drivers/iencoder.h"
 #include "../drivers/oled_ui.h"
 #include "../drivers/iservo_bus.h"
 #include "../drivers/midi_engine.h"
 #include "../drivers/persist.h"
+#include "../drivers/usb_host_engine.h"
 
 class App {
 public:
-  App(AppState& state, UnitEncoder& encoder, OledUi& ui,
+  App(AppState& state, IEncoder& encoder, OledUi& ui,
       IServoBus* bus, MidiEngine& midi);
 
   void begin();
@@ -22,7 +23,7 @@ public:
 
 private:
   AppState&    _app;
-  UnitEncoder& _encoder;
+  IEncoder&    _encoder;
   OledUi&      _ui;
   IServoBus*   _bus;
   MidiEngine&  _midi;
@@ -54,6 +55,8 @@ private:
   // MIDI helpers
   void rebuildMidiBindings();
   void tickMidi();
+  void tickHostInput();         // drain UsbHostEngine ring buffer → bindings
+  void applyHostValue(UsbHostBinding& b, int16_t rawVal); // scale + route to servo/global
   void applyMidiCC(uint8_t channel, uint8_t cc, uint8_t value);
   void doMidiPanic();
 

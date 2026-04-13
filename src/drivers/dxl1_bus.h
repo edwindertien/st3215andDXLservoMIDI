@@ -21,11 +21,14 @@
 // Default baud: 57600 (Dynamixel factory default for MX series).
 // ---------------------------------------------------------------------------
 
+// Actual servo baud rates per register formula: baud = 2000000 / (reg + 1)
+// Note: these differ from "standard" values — "57600" is actually 57142 baud (reg=34).
+//       "115200" is actually 117647 baud (reg=16). Using actual values prevents UART errors.
 static constexpr int    DXL1_BAUD_COUNT = 8;
 static constexpr uint32_t DXL1_BAUD_TABLE[DXL1_BAUD_COUNT] = {
-  9600, 19200, 57600, 115200, 200000, 250000, 400000, 1000000
+  9615, 19230, 57142, 100000, 117647, 200000, 250000, 1000000
 };
-static constexpr int DXL1_DEFAULT_BAUD_INDEX = 2; // 57600
+static constexpr int DXL1_DEFAULT_BAUD_INDEX = 2; // 57142 (~57600, reg=34)
 
 class Dxl1Bus : public IServoBus {
 public:
@@ -34,6 +37,7 @@ public:
 
   void begin(HardwareSerial& serial, uint32_t baud = 57600) override;
   void setBaud(uint32_t baud) override;
+  uint32_t currentBaud() const override { return _baud; }
 
   bool ping(uint8_t id) override;
   int  scan(uint8_t* ids, int maxIds, int& lastPingId) override;
@@ -73,19 +77,25 @@ private:
   void     txEnd();
   void     flushRx();
 
-  bool     sendInstruction(uint8_t id, uint8_t ins,
+  int      sendInstruction(uint8_t id, uint8_t ins,
                            const uint8_t* params, uint8_t paramLen);
 
-  // Read a status packet; returns error byte, -1 on timeout/framing error.
-  // fills buf[0..paramLen-1] with the parameter bytes.
-  int      recvStatus(uint8_t id, uint8_t* buf, uint8_t bufLen,
-                      uint8_t& errByte);
+  // Drain exactly byteCount bytes from RX — used to swallow the TX echo that
+  // auto-direction RS485 adapters produce at lower baud rates.
+  void     drainEcho(uint8_t byteCount);
+
+  // Read a status packet. Returns parameter byte count, or -1 on timeout/error.
+  int      recvStatus(uint8_t id, uint8_t* buf, uint8_t bufLen, uint8_t& errByte);
 
   // Convenience wrappers
-  int      readByte(uint8_t id, uint8_t addr);           // -1 on fail
-  int      readWord(uint8_t id, uint8_t addr);           // -1 on fail, LE
+  int      readByte(uint8_t id, uint8_t addr);
+  int      readWord(uint8_t id, uint8_t addr);
   bool     writeByte(uint8_t id, uint8_t addr, uint8_t val);
   bool     writeWord(uint8_t id, uint8_t addr, uint16_t val);
+
+  // EEPROM write with mandatory 5ms settle delay
+  bool     eepromWriteByte(uint8_t id, uint8_t addr, uint8_t val);
+  bool     eepromWriteWord(uint8_t id, uint8_t addr, uint16_t val);
 
   static uint8_t checksum(uint8_t id, uint8_t len,
                           uint8_t ins, const uint8_t* p, uint8_t pLen);
@@ -94,7 +104,9 @@ private:
   int             _dePin   = -1;
   uint32_t        _baud    = 57600;
 
-  static constexpr uint32_t RX_TIMEOUT_US = 50000; // 50 ms
+  static constexpr uint32_t RX_TIMEOUT_US   = 20000; // 20 ms status packet wait
+  static constexpr uint32_t ECHO_TIMEOUT_US =  5000; // 5 ms to receive our own echo
+  static constexpr uint32_t FLUSH_US        =  1000; // 1 ms fixed flush window
 
   // ---- DXL Protocol 1.0 instructions ----
   static constexpr uint8_t INS_PING  = 0x01;

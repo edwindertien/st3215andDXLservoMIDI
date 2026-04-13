@@ -39,6 +39,7 @@ struct AppState {
   int pendingMode = 0;
 
   MidiState midi;
+  UsbHostState usbHost;
 
   unsigned long lastFeedbackMs = 0;
   unsigned long lastUiMs       = 0;

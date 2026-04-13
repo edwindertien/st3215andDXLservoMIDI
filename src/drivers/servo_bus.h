@@ -11,6 +11,7 @@ class ST3215Bus : public IServoBus {
 public:
   void begin(HardwareSerial& serial, uint32_t baud = 1000000UL) override;
   void setBaud(uint32_t baud) override;
+  uint32_t currentBaud() const override { return _baud; }
 
   bool ping(uint8_t id) override;
   int  scan(uint8_t* ids, int maxIds, int& lastPingId) override;

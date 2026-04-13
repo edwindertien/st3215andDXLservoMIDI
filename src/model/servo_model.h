@@ -17,22 +17,35 @@ static constexpr uint32_t BAUD_TABLE[BAUD_TABLE_COUNT] = {
 };
 
 // Dynamixel Protocol 1.0 baud table (MX series)
+// DXL1 (MX series) baud table — values are the ACTUAL baud rates the servo
+// runs at, derived from the register formula: baud = 2000000 / (reg + 1)
+// These differ from "standard" values — e.g. the servo's "57600" is actually
+// 57142 baud (reg=34). Using the correct value avoids UART framing errors.
+// Index: 0=~9600  1=~19200  2=~57142  3=100000  4=~117647  5=200000  6=250000  7=1000000
 static constexpr int DXL1_BAUD_CNT = 8;
 static constexpr uint32_t DXL1_BAUDS[DXL1_BAUD_CNT] = {
-  9600, 19200, 57600, 115200, 200000, 250000, 400000, 1000000
+  9615, 19230, 57142, 100000, 117647, 200000, 250000, 1000000
 };
-static constexpr int DXL1_DEFAULT_BAUD_IDX = 2; // 57600
+static constexpr int DXL1_DEFAULT_BAUD_IDX = 2; // 57142 (~57600, reg=34)
+
+// Dynamixel Protocol 2.0 baud table (XM/XH/XD series)
+static constexpr int DXL2_BAUD_CNT = 8;
+static constexpr uint32_t DXL2_BAUDS[DXL2_BAUD_CNT] = {
+  9600, 57600, 115200, 1000000, 2000000, 3000000, 4000000, 4500000
+};
+static constexpr int DXL2_DEFAULT_BAUD_IDX = 1; // 57600 (XH/XM series factory default)
 
 // Active bus protocol — persisted and used to select IServoBus* at boot
 enum class BusProtocol : uint8_t {
   ST3215 = 0,
   DXL1   = 1,   // Dynamixel Protocol 1.0 (MX series RS-485)
-  // DXL2, AK60 reserved for future phases
+  DXL2   = 2,   // Dynamixel Protocol 2.0 (XM/XH/XD series RS-485)
 };
-static constexpr int BUS_PROTOCOL_COUNT = 2;
+static constexpr int BUS_PROTOCOL_COUNT = 3;
 static constexpr const char* BUS_PROTOCOL_NAMES[BUS_PROTOCOL_COUNT] = {
   "ST3215 / STS",
-  "DXL MX (P1.0)"
+  "DXL MX (P1.0)",
+  "DXL X  (P2.0)"
 };
 
 enum class MenuItemType : uint8_t { Action, Toggle, Integer, Choice, Back };
@@ -130,3 +143,59 @@ struct MidiState {
 inline int midiTotalBindings(const MidiState& m) {
   return (int)m.bindingCount + 3;
 }
+
+// ---------------------------------------------------------------------------
+// USB Host input bindings
+// Maps a USB host device event (axis, CC, button) to a servo or global param.
+// Shares the same sink semantics as MidiServoBinding — each binding maps
+// one source value (0-127 or scaled axis) to one servo or global slot.
+// ---------------------------------------------------------------------------
+
+// Source type for a UsbHostBinding
+enum class UsbHostSrcType : uint8_t {
+  MidiCC     = 0,  // CC from USB host MIDI device
+  MidiNote   = 1,  // Note-on velocity from USB host MIDI device
+  HidAxis    = 2,  // Signed axis from HID gamepad/SpaceMouse (-32768..32767)
+  HidButton  = 3,  // Button from HID gamepad (0 or 1 → maps to min or max pos)
+};
+
+static constexpr int USB_HOST_MAX_BINDINGS = 32;
+
+struct UsbHostBinding {
+  // Source
+  UsbHostSrcType srcType   = UsbHostSrcType::HidAxis;
+  uint8_t        devIndex  = 0;    // which host device slot (0-based)
+  uint8_t        srcIndex  = 0;    // axis index, CC#, or note#
+  uint8_t        srcChannel = 1;   // MIDI channel (1-16); ignored for HID
+
+  // Sink — same sentinel scheme as MidiServoBinding
+  uint8_t  servoId   = 0xFF;       // servo ID, or MIDI_GLOBAL_* sentinel
+  bool     inverted  = false;
+  uint8_t  smoothing = 0;
+  float    smoothPos = -1.0f;
+
+  // Axis scaling: raw axis range → 0..127 before applying ccToPos
+  int16_t  axisMin   = -32768;     // raw axis value → CC 0
+  int16_t  axisMax   =  32767;     // raw axis value → CC 127
+  int16_t  deadzone  = 512;        // ±deadzone around zero → no movement
+
+  // Runtime state (not persisted)
+  int8_t   lastRecv  = -1;
+  int8_t   pendingVal = -1;        // -1 = nothing pending
+  uint8_t  rxFlash   = 0;
+
+  int      minLimit  = 0;
+  int      maxLimit  = 4095;
+};
+
+// Extend MidiState to include host bindings and host-connected status
+// NOTE: This is added as a separate parallel list, not replacing MidiServoBinding.
+// The host bindings are processed in tickHostInput() alongside tickMidi().
+struct UsbHostState {
+  bool            active         = false; // enabled via MIDI Run or standalone
+  UsbHostBinding  bindings[USB_HOST_MAX_BINDINGS];
+  uint8_t         bindingCount   = 0;
+  bool            devicePresent  = false;
+  char            deviceName[12] = "---";
+  uint32_t        rxNextMs       = 0;
+};

@@ -3,13 +3,17 @@
 #include <stdio.h>
 
 OledUi::OledUi(uint16_t w, uint16_t h, TwoWire* wire, uint8_t addr)
-    : _display(w, h, wire), _addr(addr) {}
+    : _display(_OLED_CTOR(w, h, wire)), _addr(addr) {}
 
 bool OledUi::begin() {
+#if defined(DISPLAY_SSD1306)
+  if (!_display.begin(SSD1306_SWITCHCAPVCC, _addr)) return false;
+#else
   if (!_display.begin(_addr, true)) return false;
+#endif
   _display.setRotation(_rotation);
   _display.clearDisplay();
-  _display.setTextColor(SH110X_WHITE);
+  _display.setTextColor(_OLED_COLOR_ON);
   _display.setTextWrap(false);
   _display.cp437(true);
   _display.display();
@@ -36,7 +40,7 @@ void OledUi::header(const char* title) {
   _display.setTextSize(1);
   _display.setCursor(0, 0);
   _display.println(title);
-  _display.drawLine(0, 9, 127, 9, SH110X_WHITE);
+  _display.drawLine(0, 9, 127, 9, _OLED_COLOR_ON);
 }
 
 void OledUi::headerWithRight(const char* title, const char* rightText) {
@@ -56,12 +60,12 @@ void OledUi::headerWithRight(const char* title, const char* rightText) {
     _display.print(rightText);
   }
 
-  _display.drawLine(0, 9, 127, 9, SH110X_WHITE);
+  _display.drawLine(0, 9, 127, 9, _OLED_COLOR_ON);
 }
 
 void OledUi::footer(const char* text) {
   if (!text) return;
-  _display.drawLine(0, 55, 127, 55, SH110X_WHITE);
+  _display.drawLine(0, 55, 127, 55, _OLED_COLOR_ON);
   _display.setCursor(0, 57);
   _display.print(text);
 }
@@ -109,7 +113,7 @@ void OledUi::drawPositionBar(int targetPos,
     maxLimit = 4095;
   }
 
-  _display.drawRect(x, y, w, h, SH110X_WHITE);
+  _display.drawRect(x, y, w, h, _OLED_COLOR_ON);
 
   int innerX0 = x + 1;
   int innerX1 = x + w - 2;
@@ -121,24 +125,24 @@ void OledUi::drawPositionBar(int targetPos,
   // Hatch unusable left region
   for (int xx = innerX0; xx < minX; ++xx) {
     if (((xx - innerX0) & 1) == 0) {
-      _display.drawLine(xx, y + 1, xx, y + h - 2, SH110X_WHITE);
+      _display.drawLine(xx, y + 1, xx, y + h - 2, _OLED_COLOR_ON);
     }
   }
 
   // Hatch unusable right region
   for (int xx = maxX + 1; xx <= innerX1; ++xx) {
     if (((xx - innerX0) & 1) == 0) {
-      _display.drawLine(xx, y + 1, xx, y + h - 2, SH110X_WHITE);
+      _display.drawLine(xx, y + 1, xx, y + h - 2, _OLED_COLOR_ON);
     }
   }
 
   // Endpoint markers
-  _display.drawLine(minX, y + 1, minX, y + h - 2, SH110X_WHITE);
-  _display.drawLine(maxX, y + 1, maxX, y + h - 2, SH110X_WHITE);
+  _display.drawLine(minX, y + 1, minX, y + h - 2, _OLED_COLOR_ON);
+  _display.drawLine(maxX, y + 1, maxX, y + h - 2, _OLED_COLOR_ON);
 
   // Target marker: thin line
   int tgtX = map(targetPos, 0, 4095, innerX0, innerX1);
-  _display.drawLine(tgtX, y + 1, tgtX, y + h - 2, SH110X_WHITE);
+  _display.drawLine(tgtX, y + 1, tgtX, y + h - 2, _OLED_COLOR_ON);
 
   // Actual marker: filled block
   if (actualPos >= 0) {
@@ -147,7 +151,7 @@ void OledUi::drawPositionBar(int targetPos,
     int boxX = actX - (boxW / 2);
     if (boxX < innerX0) boxX = innerX0;
     if (boxX > innerX1 - boxW + 1) boxX = innerX1 - boxW + 1;
-    _display.fillRect(boxX, y + 2, boxW, h - 4, SH110X_WHITE);
+    _display.fillRect(boxX, y + 2, boxW, h - 4, _OLED_COLOR_ON);
   }
 }
 
@@ -388,7 +392,9 @@ void OledUi::drawConfigMenu(uint8_t servoId,
                             int baudIndex,
                             bool dirty,
                             int selected,
-                            bool editing) {
+                            bool editing,
+                            const uint32_t* baudTable,
+                            int baudCount) {
   char right[20];
   snprintf(right, sizeof(right), "ID %u%s", servoId, dirty ? "*" : "");
   headerWithRight("Configure", right);
@@ -421,8 +427,8 @@ void OledUi::drawConfigMenu(uint8_t servoId,
       case 4: _display.print(centerOffset);                           break;
       case 5: _display.print(mode == 0 ? "Servo" : "Wheel");         break;
       case 6: {
-        // Show abbreviated baud (e.g. "1M", "500K", "115K")
-        uint32_t b = BAUD_TABLE[baudIndex];
+        int bi = (baudIndex >= 0 && baudIndex < baudCount) ? baudIndex : 0;
+        uint32_t b = baudTable[bi];
         if (b >= 1000000UL)      { _display.print(b / 1000000UL); _display.print("M"); }
         else if (b >= 1000UL)    { _display.print(b / 1000UL);    _display.print("K"); }
         else                     { _display.print(b); }
@@ -444,7 +450,9 @@ void OledUi::drawConfirmSave(uint8_t servoId,
                              int mode,
                              int baudIndex,
                              bool dirty,
-                             int selected) {
+                             int selected,
+                             const uint32_t* baudTable,
+                             int baudCount) {
   char right[20];
   snprintf(right, sizeof(right), "ID %u", servoId);
   headerWithRight("Save Config?", right);
@@ -462,7 +470,8 @@ void OledUi::drawConfirmSave(uint8_t servoId,
   _display.setCursor(0, 32);
   _display.print("Md:"); _display.print(mode == 0 ? "Srv" : "Whl");
   {
-    uint32_t b = BAUD_TABLE[baudIndex];
+    int bi = (baudIndex >= 0 && baudIndex < baudCount) ? baudIndex : 0;
+    uint32_t b = baudTable[bi];
     _display.print(" Bd:");
     if (b >= 1000000UL)   { _display.print(b / 1000000UL); _display.print("M"); }
     else if (b >= 1000UL) { _display.print(b / 1000UL);    _display.print("K"); }
@@ -473,17 +482,17 @@ void OledUi::drawConfirmSave(uint8_t servoId,
   // Yes / No buttons at y=44
   const int y = 44;
   if (selected == 0) {
-    _display.fillRect(0, y - 1, 28, 9, SH110X_WHITE);
-    _display.setTextColor(SH110X_BLACK);
+    _display.fillRect(0, y - 1, 28, 9, _OLED_COLOR_ON);
+    _display.setTextColor(_OLED_COLOR_OFF);
     _display.setCursor(4, y);  _display.print("No");
-    _display.setTextColor(SH110X_WHITE);
+    _display.setTextColor(_OLED_COLOR_ON);
     _display.setCursor(40, y); _display.print("Yes");
   } else {
     _display.setCursor(4, y);  _display.print("No");
-    _display.fillRect(36, y - 1, 32, 9, SH110X_WHITE);
-    _display.setTextColor(SH110X_BLACK);
+    _display.fillRect(36, y - 1, 32, 9, _OLED_COLOR_ON);
+    _display.setTextColor(_OLED_COLOR_OFF);
     _display.setCursor(40, y); _display.print("Yes");
-    _display.setTextColor(SH110X_WHITE);
+    _display.setTextColor(_OLED_COLOR_ON);
   }
 
   _display.display();
@@ -524,10 +533,10 @@ void OledUi::drawScanProgress(uint32_t baud,
   const int barW = 128;
   const int barH = 6;
 
-  _display.drawRect(barX, barY, barW, barH, SH110X_WHITE);
+  _display.drawRect(barX, barY, barW, barH, _OLED_COLOR_ON);
   int fillW = map(progress, 0, totalIds, 0, barW - 2);
   if (fillW > 0) {
-    _display.fillRect(barX + 1, barY + 1, fillW, barH - 2, SH110X_WHITE);
+    _display.fillRect(barX + 1, barY + 1, fillW, barH - 2, _OLED_COLOR_ON);
   }
 
   footer("Long=stop");
@@ -536,16 +545,15 @@ void OledUi::drawScanProgress(uint32_t baud,
 // ---------------------------------------------------------------------------
 // Baud-select screen: 8 named baud rates + "Scan All" at the bottom
 // ---------------------------------------------------------------------------
-void OledUi::drawScanBaudSelect(int selected) {
+void OledUi::drawScanBaudSelect(int selected, const uint32_t* baudTable, int baudCount) {
   header("Scan Baud Rate");
 
-  // Show 4 rows at a time (scroll)
   int start = 0;
   if (selected >= 4) start = selected - 3;
 
-  const int y0   = 12;
-  const int step = 10;
-  const int total = BAUD_TABLE_COUNT + 1; // 8 rates + Scan All
+  const int y0    = 12;
+  const int step  = 10;
+  const int total = baudCount + 1; // rates + Scan All
 
   for (int row = 0; row < 4; ++row) {
     int idx = start + row;
@@ -555,9 +563,8 @@ void OledUi::drawScanBaudSelect(int selected) {
     if (idx == selected) drawSelectionMarker(y, false);
     _display.setCursor(10, y);
 
-    if (idx < BAUD_TABLE_COUNT) {
-      // Print human-readable baud rate
-      uint32_t b = BAUD_TABLE[idx];
+    if (idx < baudCount) {
+      uint32_t b = baudTable[idx];
       if (b >= 1000000UL) {
         _display.print(b / 1000000UL);
         _display.print(",000,000");
@@ -602,9 +609,9 @@ void OledUi::drawScanAllProgress(uint32_t currentBaud,
   // Baud step bar
   {
     const int bx = 0, by = 22, bw = 128, bh = 5;
-    _display.drawRect(bx, by, bw, bh, SH110X_WHITE);
+    _display.drawRect(bx, by, bw, bh, _OLED_COLOR_ON);
     int fill = map(baudStep, 0, baudTotal, 0, bw - 2);
-    if (fill > 0) _display.fillRect(bx + 1, by + 1, fill, bh - 2, SH110X_WHITE);
+    if (fill > 0) _display.fillRect(bx + 1, by + 1, fill, bh - 2, _OLED_COLOR_ON);
   }
 
   _display.setCursor(0, 30);
@@ -618,9 +625,9 @@ void OledUi::drawScanAllProgress(uint32_t currentBaud,
     int progress = (lastPingId < 0) ? 0 : lastPingId;
     if (progress > totalIds) progress = totalIds;
     const int bx = 0, by = 40, bw = 128, bh = 5;
-    _display.drawRect(bx, by, bw, bh, SH110X_WHITE);
+    _display.drawRect(bx, by, bw, bh, _OLED_COLOR_ON);
     int fill = map(progress, 0, totalIds, 0, bw - 2);
-    if (fill > 0) _display.fillRect(bx + 1, by + 1, fill, bh - 2, SH110X_WHITE);
+    if (fill > 0) _display.fillRect(bx + 1, by + 1, fill, bh - 2, _OLED_COLOR_ON);
   }
 
   footer("Long=stop");
@@ -645,17 +652,17 @@ void OledUi::drawModeWarn(int selected) {
   // No / Yes buttons at y=50
   const int y = 50;
   if (selected == 0) {
-    _display.fillRect(0, y - 1, 28, 9, SH110X_WHITE);
-    _display.setTextColor(SH110X_BLACK);
+    _display.fillRect(0, y - 1, 28, 9, _OLED_COLOR_ON);
+    _display.setTextColor(_OLED_COLOR_OFF);
     _display.setCursor(4, y);  _display.print("No");
-    _display.setTextColor(SH110X_WHITE);
+    _display.setTextColor(_OLED_COLOR_ON);
     _display.setCursor(40, y); _display.print("Yes");
   } else {
     _display.setCursor(4, y);  _display.print("No");
-    _display.fillRect(36, y - 1, 32, 9, SH110X_WHITE);
-    _display.setTextColor(SH110X_BLACK);
+    _display.fillRect(36, y - 1, 32, 9, _OLED_COLOR_ON);
+    _display.setTextColor(_OLED_COLOR_OFF);
     _display.setCursor(40, y); _display.print("Yes");
-    _display.setTextColor(SH110X_WHITE);
+    _display.setTextColor(_OLED_COLOR_ON);
   }
 
   _display.display();
@@ -848,11 +855,11 @@ void OledUi::drawMidiRun(const MidiServoBinding* bindings,
     } else if (idx == totalBindings + 1) {
       // Panic row
       if (isSelected) {
-        _display.fillRect(0, y - 1, 128, 10, SH110X_WHITE);
-        _display.setTextColor(SH110X_BLACK);
+        _display.fillRect(0, y - 1, 128, 10, _OLED_COLOR_ON);
+        _display.setTextColor(_OLED_COLOR_OFF);
         _display.setCursor(10, y);
         _display.print("!! MIDI PANIC !!");
-        _display.setTextColor(SH110X_WHITE);
+        _display.setTextColor(_OLED_COLOR_ON);
       } else {
         _display.setCursor(10, y);
         _display.print("!! MIDI PANIC !!");
@@ -976,15 +983,15 @@ void OledUi::drawSelectProtocol(int activeProtocol, int cursor) {
     bool isActive = (i == activeProtocol);
 
     if (isCursor) {
-      _display.fillRect(0, y - 1, 128, 11, SH110X_WHITE);
-      _display.setTextColor(SH110X_BLACK);
+      _display.fillRect(0, y - 1, 128, 11, _OLED_COLOR_ON);
+      _display.setTextColor(_OLED_COLOR_OFF);
     }
 
     _display.setCursor(4, y);
     _display.print(isActive ? "\x10 " : "  "); // filled arrow = current
     _display.print(BUS_PROTOCOL_NAMES[i]);
 
-    if (isCursor) _display.setTextColor(SH110X_WHITE);
+    if (isCursor) _display.setTextColor(_OLED_COLOR_ON);
   }
 
   footer("Shrt=select  Lng=back");

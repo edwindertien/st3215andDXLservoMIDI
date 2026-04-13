@@ -4,7 +4,7 @@
 #include "../config.h"
 
 static constexpr uint32_t PERSIST_MAGIC   = 0x53543332;
-static constexpr uint8_t  PERSIST_VERSION = 7;  // bumped: added BusProtocol
+static constexpr uint8_t  PERSIST_VERSION = 8;  // bumped: added DXL2 protocol
 static constexpr char     PERSIST_PATH[]  = "/config.bin";
 
 struct PersistedMidiBinding {

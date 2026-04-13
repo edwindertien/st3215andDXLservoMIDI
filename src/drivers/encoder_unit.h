@@ -1,8 +1,9 @@
 #pragma once
 #include <Arduino.h>
 #include <Wire.h>
+#include "iencoder.h"
 
-class UnitEncoder {
+class UnitEncoder : public IEncoder {
 public:
   UnitEncoder(TwoWire& wire, uint8_t addr);
 

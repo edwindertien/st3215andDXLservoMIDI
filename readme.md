@@ -93,6 +93,9 @@ Two hardware configurations are supported, selected at compile time via the Plat
 | 6 | Servos: ST3215, MX-28R/64R, or XH/XM series | One or more, same bus |
 | 7 | DC supply for servos (voltage per servo spec) | Shared GND with Pico mandatory |
 
+
+![grove shield by SEEED](images/pi-pico-w-pinout-3579354621.jpg)
+
 ---
 
 ### Hookup Table (Pico + Grove Shield)
@@ -620,3 +623,7 @@ servo-tester/
 | Wheel mode won't engage | Safety screen defaults No | Must explicitly turn to Yes on the ⚠ screen |
 | DXL1 ping wrong baud | "57600" is actually 57142 | Firmware uses 57142 (2,000,000/35); Wizard also uses this value for "57600" |
 | PlatformIO won't find Pico port | Driver not installed | Install Zadig (Windows) or check udev rules (Linux) |
+
+In some cases the Dynamixal Wizard by Robotis can help, but when screwing up with message return time or non-matching baudrates sometimes it is better to work blind with the last known values and `just send' data..
+
+![Dynamixel Wizard debug tool](images/Screenshot%202026-04-11%20at%2021.24.31.png)

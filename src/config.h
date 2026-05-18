@@ -37,7 +37,7 @@ namespace HW {
   static constexpr uint8_t  ENC_SCL_PIN    = 7;
   static constexpr uint8_t  ENC_ADDR       = 0x40;    // single encoder
   static constexpr uint8_t  ENC_8_ADDR     = 0x41;    // 8-encoder unit
-  static constexpr uint32_t ENC_I2C_HZ     = 200000UL;
+  static constexpr uint32_t ENC_I2C_HZ     = 400000UL;  // 400 kHz — both buses
 
   static constexpr uint8_t  USB_HOST_DP_PIN = 16;
   static constexpr uint8_t  USB_HOST_DM_PIN = 17;

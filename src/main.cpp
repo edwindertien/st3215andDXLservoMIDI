@@ -316,20 +316,23 @@ void loop() {
   if (Serial.available()) {
     char cmd = (char)Serial.read();
     if (cmd == 'p' || cmd == 'P') {
-      Serial.println(F("\n--- DXL2 raw ping ID=1 @ 57600 ---"));
       dxl2Bus.setBaud(57600);
+      Serial.println(F("\n--- DXL2 raw ping ID=1 @ 57600 ---"));
       dxl2Bus.rawPingDump(1, Serial);
     }
     else if (cmd == 'b' || cmd == 'B') {
-      Serial.println(F("\n--- DXL2 broadcast ping @ 57600 ---"));
       dxl2Bus.setBaud(57600);
+      Serial.println(F("\n--- DXL2 broadcast ping @ 57600 ---"));
       dxl2Bus.rawBroadcastDump(Serial);
     }
     else if (cmd == 'd' || cmd == 'D') {
       // DXL1 ping via the actual dxl1Bus driver — tests the full code path
-      Serial.println(F("\n--- DXL1Bus ping ID=1 @ 57142 ---"));
       dxl1Bus.setBaud(57142);
       bool ok = dxl1Bus.ping(1);
+      int mv = -1, tc = -1;
+      if (ok) { dxl1Bus.readVoltage(1, mv); dxl1Bus.readTemperature(1, tc); }
+      // All Serial prints AFTER servo comms
+      Serial.println(F("\n--- DXL1Bus ping ID=1 @ 57142 ---"));
       Serial.print(F("ping(1) = "));
       Serial.println(ok ? F("OK") : F("FAIL (timeout or bad checksum)"));
       if (!ok) {
@@ -338,51 +341,58 @@ void loop() {
         Serial.println(F("  - Servo may be at a different baud -> use 'a' to scan all"));
         Serial.println(F("  - Use 'e' to test raw loopback (adapter RX path)"));
       } else {
-        // Also dump voltage & temp if we got a ping response
-        int mv = -1, tc = -1;
-        dxl1Bus.readVoltage(1, mv);
-        dxl1Bus.readTemperature(1, tc);
         Serial.print(F("  Voltage: ")); Serial.print(mv); Serial.println(F(" mV"));
         Serial.print(F("  Temp:    ")); Serial.print(tc); Serial.println(F(" degC"));
       }
     }
     else if (cmd == 'e' || cmd == 'E') {
-      // Raw byte loopback — bypasses dxl1Bus, confirms adapter RX path
-      Serial.println(F("\n--- Raw DXL1 ping ID=1 @ 57142 (adapter RX test) ---"));
+      // Raw byte loopback — bypasses dxl1Bus, confirms adapter RX path.
+      // Buffer ALL received bytes before any Serial.print — printing inside
+      // the receive loop would block the CDC TX buffer and delay reads.
+      Serial1.end();
       Serial1.begin(57142);
-      while (Serial1.available()) Serial1.read(); // drain
+      while (Serial1.available()) Serial1.read(); // drain stale bytes
+
       uint8_t dxl1ping[] = {0xFF,0xFF,0x01,0x02,0x01,0xFB};
+      for (uint8_t b : dxl1ping) Serial1.write(b);
+      Serial1.flush();
+
+      // Buffer capture with microsecond timestamps
+      static const int EBUF = 32;
+      uint8_t  eb[EBUF]; uint32_t et[EBUF]; int en = 0;
+      unsigned long et0 = micros();
+      while (micros() - et0 < 100000UL && en < EBUF) { // 100ms window
+        if (Serial1.available()) {
+          eb[en] = Serial1.read(); et[en] = micros() - et0; ++en;
+        }
+      }
+      dxl1Bus.setBaud(57142); // restore driver ownership
+
+      // All prints after capture
+      Serial.println(F("\n--- Raw DXL1 ping ID=1 @ 57142 (adapter RX test) ---"));
       Serial.print(F("TX: "));
       for (uint8_t b : dxl1ping) { if (b < 0x10) Serial.print('0'); Serial.print(b, HEX); Serial.print(' '); }
       Serial.println();
-      for (uint8_t b : dxl1ping) Serial1.write(b);
-      Serial1.flush();
-      Serial.print(F("RX (100ms): "));
-      unsigned long t0 = millis(); int cnt = 0;
-      while (millis() - t0 < 100) {
-        if (Serial1.available()) {
-          uint8_t b = Serial1.read();
-          if (b < 0x10) Serial.print('0');
-          Serial.print(b, HEX); Serial.print(' ');
-          ++cnt;
-        }
+      Serial.print(F("RX: "));
+      for (int i = 0; i < en; ++i) {
+        Serial.print('['); Serial.print(et[i]); Serial.print(F("us] "));
+        if (eb[i] < 0x10) Serial.print('0'); Serial.print(eb[i], HEX); Serial.print(' ');
       }
-      if (!cnt) Serial.println(F("(nothing)"));
-      else { Serial.println(); Serial.print(F("Total bytes: ")); Serial.println(cnt); }
+      if (!en) Serial.println(F("(nothing)"));
+      else { Serial.println(); Serial.print(F("Total: ")); Serial.println(en); }
       Serial.println(F("Expected (no echo adapter): FF FF 01 02 00 FC"));
       Serial.println(F("Expected (echo adapter):    FF FF 01 02 01 FB  FF FF 01 02 00 FC"));
-      // Restore bus baud
-      dxl1Bus.setBaud(57142);
     }
     else if (cmd == 'a' || cmd == 'A') {
-      // Scan all DXL2 baud rates with raw ping — find which baud the servo answers on
+      // Scan all DXL2 baud rates — setBaud() and capture BEFORE any header print
       Serial.println(F("\n--- DXL2 raw ping ID=1 on ALL baud rates ---"));
       uint32_t bauds[] = {9600, 57142, 57600, 100000, 115200, 117647, 1000000};
       for (uint32_t baud : bauds) {
         dxl2Bus.setBaud(baud);
-        Serial.print(F("  @ ")); Serial.print(baud);
-        Serial.print(F(": "));
-        // send ping, collect 50ms raw bytes after echo
+        // Print baud label then immediately capture — rawPingDump() buffers
+        // internally so no USB print happens inside the receive window.
+        Serial.print(F("  @ ")); Serial.print(baud); Serial.print(F(": "));
+        Serial.flush(); // drain CDC TX so print arrives before capture starts
         dxl2Bus.rawPingDump(1, Serial);
       }
       dxl2Bus.setBaud(57600);
@@ -390,32 +400,27 @@ void loop() {
     else if (cmd == 'w' || cmd == 'W') {
       // Send the EXACT Wizard ping packet at 1Mbaud — hardcoded, no CRC computation.
       // FF FF FD 00 01 03 00 01 19 4E  (Wizard-verified CRC)
-      // This bypasses our crc16() entirely so we can test whether the servo
-      // responds to this exact packet.
-      Serial.println(F("\n--- Wizard-exact ping @ 1Mbaud: FF FF FD 00 01 03 00 01 19 4E ---"));
       dxl2Bus.setBaud(1000000);
       delay(10);
+      while (Serial1.available()) Serial1.read(); // drain
 
-      // Drain RX
-      while (Serial1.available()) Serial1.read();
-
-      // Send exact bytes — no txBegin/txEnd, just raw write + flush + guard
-      const uint8_t wizPing[] = {0xFF, 0xFF, 0xFD, 0x00, 0x01, 0x03, 0x00, 0x01, 0x19, 0x4E};
-      Serial.print(F("TX: "));
-      for (uint8_t b : wizPing) { if (b < 0x10) Serial.print('0'); Serial.print(b, HEX); Serial.print(' '); }
-      Serial.println();
-
+      const uint8_t wizPing[] = {0xFF,0xFF,0xFD,0x00,0x01,0x03,0x00,0x01,0x19,0x4E};
       for (uint8_t b : wizPing) Serial1.write(b);
       Serial1.flush();
-      delayMicroseconds(500); // generous guard — wait well past adapter switch + return delay
+      delayMicroseconds(500);
 
-      // Buffer everything for 5ms with microsecond timestamps
+      // Buffer capture — all Serial.print AFTER
       static const int WBUF = 64;
       uint8_t  wb[WBUF]; uint32_t wt[WBUF]; int wn = 0;
       unsigned long wt0 = micros();
       while (micros() - wt0 < 5000 && wn < WBUF) {
         if (Serial1.available()) { wb[wn] = Serial1.read(); wt[wn] = micros() - wt0; ++wn; }
       }
+
+      Serial.println(F("\n--- Wizard-exact ping @ 1Mbaud: FF FF FD 00 01 03 00 01 19 4E ---"));
+      Serial.print(F("TX: "));
+      for (uint8_t b : wizPing) { if (b < 0x10) Serial.print('0'); Serial.print(b, HEX); Serial.print(' '); }
+      Serial.println();
       Serial.print(F("RX: "));
       for (int i = 0; i < wn; ++i) {
         Serial.print('['); Serial.print(wt[i]); Serial.print(F("us] "));

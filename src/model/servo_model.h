@@ -95,6 +95,8 @@ struct MidiServoBinding {
   bool    inverted  = false;   // if true: CC 0→maxPos, CC 127→minPos
   uint8_t smoothing = 0;       // 0=no filter, 127=max (IIR alpha = (128-s)/128)
   float   smoothPos = -1.0f;   // filtered target position (-1 = uninitialised)
+  int     lastRawTarget = -1;  // last ccToPos() result; kept so smoothing
+                               // converges to final target after last CC arrives
   int8_t  lastSent  = -1;
   int8_t  lastRecv  = -1;
   int8_t  pendingCC = -1;

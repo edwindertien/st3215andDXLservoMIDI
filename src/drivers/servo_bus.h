@@ -4,6 +4,42 @@
 #include "iservo_bus.h"
 
 // ---------------------------------------------------------------------------
+// EchoSMS_STS — SMS_STS subclass that overrides wFlushSCS() to drain the
+// TX echo produced by auto-direction (no DE/RE pin) TTL/RS485 adapters.
+//
+// The SCServo library calls wFlushSCS() immediately after transmitting each
+// packet and before reading the servo response. The base implementation is
+// empty. We override it to drain all bytes that arrived during transmission
+// (the echo) so that checkHead() / readSCS() then see only the real response.
+//
+// Drain window: wait up to 3 byte-times at the current baud, reading until
+// the UART goes quiet. This is always shorter than the servo's return delay
+// (~500us for ST3215) so the real response is never consumed.
+// ---------------------------------------------------------------------------
+class EchoSMS_STS : public SMS_STS {
+public:
+  uint32_t _baud = 1000000UL; // kept in sync with Serial1 baud by ST3215Bus
+
+protected:
+  void wFlushSCS() override {
+    if (!pSerial) return;
+    // Wait for UART TX to physically complete. write() is non-blocking;
+    // flush() blocks until the shift register sends its last bit.
+    // By the time flush() returns, ALL echo bytes have arrived in the
+    // RX FIFO (echo propagation = ~1µs, well within flush() settling).
+    pSerial->flush();
+    // Wait 2 byte-times as a margin, then drain the echo.
+    // Do NOT use drain-until-empty — that would consume the servo response
+    // which arrives ~50µs after the echo ends.
+    // 2 byte-times at _baud is always enough margin and always ends before
+    // the servo starts responding.
+    uint32_t waitUs = (2UL * 10UL * 1000000UL) / _baud;
+    delayMicroseconds(waitUs);
+    while (pSerial->read() != -1) {} // discard echo bytes
+  }
+};
+
+// ---------------------------------------------------------------------------
 // ST3215Bus — concrete IServoBus implementation for Waveshare ST3215 / STS
 // series serial bus servos (SCServo / SMS_STS protocol).
 // ---------------------------------------------------------------------------
@@ -41,14 +77,12 @@ public:
   int posMax() const override { return 4095; }
 
 private:
-  SMS_STS          _servo;
+  EchoSMS_STS      _servo;  // echo-aware subclass of SMS_STS
   HardwareSerial*  _serial = nullptr;
   uint32_t         _baud   = 1000000UL;
 };
 
 // ---------------------------------------------------------------------------
 // Global instance — used by main.cpp and injected into App via IServoBus*.
-// When more protocols are added, main.cpp will select which concrete object
-// to pass to App based on the stored protocol selection.
 // ---------------------------------------------------------------------------
 extern ST3215Bus st3215Bus;

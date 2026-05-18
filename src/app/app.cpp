@@ -137,6 +137,7 @@ void App::loadPersistedState() {
       b.inverted  = cfg.midiBindings[i].inverted;
       b.smoothing = cfg.midiBindings[i].smoothing;
       b.smoothPos = -1.0f;
+      b.lastRawTarget = -1;
       b.lastSent = -1; b.lastRecv = -1; b.pendingCC = -1;
       b.txFlash  = 0;  b.rxFlash  = 0;
       uint8_t dummyId; int dummyTorq, dummyOfs, dummyMode, dummyBaud;
@@ -475,7 +476,7 @@ void App::rebuildMidiBindings() {
     b.servoId   = sid;
     b.cc        = MIDI_CC_NONE;
     b.channel   = m.channel;
-    b.lastSent  = -1; b.lastRecv = -1; b.pendingCC = -1;
+    b.lastSent  = -1; b.lastRecv = -1; b.pendingCC = -1; b.lastRawTarget = -1;
     b.txFlash   = 0;  b.rxFlash  = 0;
 
     // Preserve previous CC/channel for this servo ID
@@ -514,6 +515,7 @@ void App::rebuildMidiBindings() {
     b.inverted  = false;
     b.smoothing = 0;
     b.smoothPos = -1.0f;
+    b.lastRawTarget = -1;
     b.lastSent  = -1; b.lastRecv = -1; b.pendingCC = -1;
     b.txFlash   = 0;  b.rxFlash  = 0;
     b.minLimit  = 0;  b.maxLimit = 4095;
@@ -630,7 +632,7 @@ void App::tickMidi() {
         ccVal = (m.bindingCount > 0) ? m.bindings[0].smoothing : 0;
       } else {
         int pos = _bus->readPosition(b.servoId);
-        if (pos < 0) break;
+        if (pos < 0) continue; // servo not responding — skip, try next
         ccVal = posToCC(pos, b.minLimit, b.maxLimit, b.inverted);
       }
 
@@ -643,53 +645,60 @@ void App::tickMidi() {
     }
   }
 
-  // ---- RX: flush pending inbound CC values ----
+  // ---- RX: flush pending inbound CC values, then continue smoothing ----
   if (now >= m.rxNextMs) {
     m.rxNextMs = now + MIDI_RX_INTERVAL_MS;
     int total  = midiTotalBindings(m);
 
     for (int i = 0; i < total; ++i) {
       MidiServoBinding& b = m.bindings[i];
-      if (b.pendingCC < 0) continue;
-      uint8_t val = (uint8_t)b.pendingCC;
-      b.pendingCC = -1;
+      bool needsSend = false;
 
-      if (b.servoId == MIDI_GLOBAL_SPEED) {
-        _app.speed = (int)map((long)val, 0, 127, 0, 4095);
-        markDirty();
-        for (uint8_t s = 0; s < _app.servoCount; ++s)
-          _bus->setPosition(_app.ids[s], _bus->readPosition(_app.ids[s]),
-                           _app.speed, _app.acc);
-      } else if (b.servoId == MIDI_GLOBAL_ACC) {
-        _app.acc = (int)map((long)val, 0, 127, 0, 254);
-        markDirty();
-        for (uint8_t s = 0; s < _app.servoCount; ++s)
-          _bus->setPosition(_app.ids[s], _bus->readPosition(_app.ids[s]),
-                           _app.speed, _app.acc);
-      } else if (b.servoId == MIDI_GLOBAL_SMOOTH) {
-        // Apply smoothing value to all per-servo bindings
-        for (uint8_t s = 0; s < m.bindingCount; ++s)
-          m.bindings[s].smoothing = val;
-      } else {
-        // Compute raw target position
-        int rawTarget = ccToPos(val, b.minLimit, b.maxLimit, b.inverted);
+      // --- Update lastRawTarget from new CC if one arrived ---
+      if (b.pendingCC >= 0) {
+        uint8_t val = (uint8_t)b.pendingCC;
+        b.pendingCC = -1;
 
-        // Apply IIR smoothing filter if enabled
-        // alpha = (128 - smoothing) / 128.0f
-        // smoothing=0 → alpha=1.0 (instant), smoothing=127 → alpha≈0.008 (very slow)
+        if (b.servoId == MIDI_GLOBAL_SPEED) {
+          _app.speed = (int)map((long)val, 0, 127, 0, 4095);
+          markDirty();
+          // Do NOT re-send positions — _app.targetPos is the live-control
+          // single position; sending it would snap all servos to center.
+          // New speed takes effect on the next per-servo setPosition call.
+        } else if (b.servoId == MIDI_GLOBAL_ACC) {
+          _app.acc = (int)map((long)val, 0, 127, 0, 254);
+          markDirty();
+          // Same — do not re-send positions.
+        } else if (b.servoId == MIDI_GLOBAL_SMOOTH) {
+          for (uint8_t s = 0; s < m.bindingCount; ++s)
+            m.bindings[s].smoothing = val;
+        } else {
+          int rawTarget = ccToPos(val, b.minLimit, b.maxLimit, b.inverted);
+          if (b.smoothPos < 0.0f) b.smoothPos = (float)rawTarget;
+          b.lastRawTarget = rawTarget;
+          needsSend = true; // new CC always triggers a send
+        }
+      } else if (b.servoId < MIDI_GLOBAL_SPEED && b.lastRawTarget >= 0
+                 && b.smoothing > 0) {
+        // Continue smoothing only if filter hasn't converged yet.
+        // Threshold: within 1 count of target — stops bus hammering at rest.
+        needsSend = (abs((int)(b.smoothPos + 0.5f) - b.lastRawTarget) > 1);
+      }
+
+      // --- Send only when needed ---
+      if (needsSend && b.servoId < MIDI_GLOBAL_SPEED && b.lastRawTarget >= 0) {
         int finalTarget;
         if (b.smoothing == 0) {
-          finalTarget   = rawTarget;
-          b.smoothPos   = (float)rawTarget;
+          finalTarget  = b.lastRawTarget;
+          b.smoothPos  = (float)b.lastRawTarget;
         } else {
-          if (b.smoothPos < 0.0f) b.smoothPos = (float)rawTarget; // initialise
-          float alpha   = (128.0f - (float)b.smoothing) / 128.0f;
-          b.smoothPos   = alpha * (float)rawTarget + (1.0f - alpha) * b.smoothPos;
-          finalTarget   = (int)(b.smoothPos + 0.5f);
-          finalTarget   = clampInt(finalTarget, b.minLimit, b.maxLimit);
+          float alpha  = (128.0f - (float)b.smoothing) / 128.0f;
+          b.smoothPos  = alpha * (float)b.lastRawTarget + (1.0f - alpha) * b.smoothPos;
+          finalTarget  = (int)(b.smoothPos + 0.5f);
+          finalTarget  = clampInt(finalTarget, b.minLimit, b.maxLimit);
         }
-
         _bus->setPosition(b.servoId, finalTarget, _app.speed, _app.acc);
+        delay(1); // inter-servo gap — prevents current spike cascade
       }
     }
   }
@@ -707,11 +716,12 @@ void App::doMidiPanic() {
   MidiState& m = _app.midi;
   int total    = midiTotalBindings(m);
   for (int i = 0; i < total; ++i) {
-    m.bindings[i].lastSent = -1;
-    m.bindings[i].lastRecv = -1;
+    m.bindings[i].lastSent  = -1;
+    m.bindings[i].lastRecv  = -1;
     m.bindings[i].pendingCC = -1;
-    m.bindings[i].txFlash  = 0;
-    m.bindings[i].rxFlash  = 0;
+    m.bindings[i].lastRawTarget = -1;
+    m.bindings[i].txFlash   = 0;
+    m.bindings[i].rxFlash   = 0;
   }
 }
 
@@ -1550,6 +1560,7 @@ bool App::saveStagedConfig() {
   if (savedBaud != _bus->currentBaud()) {
     _app.scanBaudIndex = _app.cfg.baudIndex; // track new baud for next scan
     _bus->setBaud(savedBaud);                // switch now so servo stays reachable
+    markDirty();                             // persist new scanBaudIndex to flash
     strncpy(_app.saveMessage, "Saved! Baud changed", sizeof(_app.saveMessage));
   }
   else

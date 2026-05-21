@@ -163,6 +163,8 @@ void App::loadPersistedState() {
       smt = {}; smt.servoId = MIDI_GLOBAL_SMOOTH;
       smt.cc = cfg.smoothCC; smt.channel = cfg.smoothChannel;
     }
+    _app.midi.runMode    = (MidiRunMode)cfg.midiRunMode;
+    _app.midi.jumpFilter = cfg.midiJumpFilter;
   } else {
     // No valid saved state — scan the bus as before
     if (_app.oledOk) _ui.splash("Scanning bus...");
@@ -206,6 +208,8 @@ void App::savePersistedState() {
     cfg.smoothCC      = smt.cc;
     cfg.smoothChannel = smt.channel;
   }
+  cfg.midiRunMode    = (uint8_t)_app.midi.runMode;
+  cfg.midiJumpFilter = _app.midi.jumpFilter;
 
   persist.save(cfg);
 }
@@ -557,13 +561,23 @@ void App::rebuildMidiBindings() {
 void App::onMidiCC(uint8_t channel, uint8_t cc, uint8_t value) {
   if (!_app.midi.active) return;
   MidiState& m = _app.midi;
-  // Log is written by onMidiAny (also called for CC by the engine)
-  // Buffer the latest value for the rate-limited RX flush
-  // (covers both per-servo and global speed/acc/smooth bindings)
   int total = midiTotalBindings(m);
   for (int i = 0; i < total; ++i) {
     MidiServoBinding& b = m.bindings[i];
     if (b.cc == MIDI_CC_NONE || b.cc != cc || b.channel != channel) continue;
+
+    // Jump filter: reject CC if it jumps more than jumpFilter steps from the
+    // last accepted value. Blocks sudden drops to 0 on empty Ableton tracks
+    // while passing gradual movements through unchanged.
+    // jumpFilter=0 means disabled (accept everything).
+    if (m.jumpFilter > 0 && b.lastRecv >= 0) {
+      int delta = abs((int)value - (int)(uint8_t)b.lastRecv);
+      if (delta > (int)m.jumpFilter) {
+        b.rxFlash = MIDI_FLASH_FRAMES; // flash so user can see filtered events
+        continue; // reject
+      }
+    }
+
     b.pendingCC = (int8_t)value;
     b.lastRecv  = (int8_t)value;
     b.rxFlash   = MIDI_FLASH_FRAMES;
@@ -611,7 +625,9 @@ void App::tickMidi() {
   uint32_t   now    = millis();
 
   // ---- TX: poll one binding and send outgoing CC ----
-  if (now >= m.txNextMs && midiTotalBindings(m) > 0) {
+  // Skipped in RecvOnly mode — arm is a pure playback target, not a controller.
+  if (m.runMode != MidiRunMode::RecvOnly &&
+      now >= m.txNextMs && midiTotalBindings(m) > 0) {
     m.txNextMs = now + MIDI_TX_INTERVAL_MS;
     int total = midiTotalBindings(m);
 
@@ -646,7 +662,8 @@ void App::tickMidi() {
   }
 
   // ---- RX: flush pending inbound CC values, then continue smoothing ----
-  if (now >= m.rxNextMs) {
+  // Skipped in SendOnly mode — arm is a pure controller, ignores playback.
+  if (m.runMode != MidiRunMode::SendOnly && now >= m.rxNextMs) {
     m.rxNextMs = now + MIDI_RX_INTERVAL_MS;
     int total  = midiTotalBindings(m);
 
@@ -698,7 +715,10 @@ void App::tickMidi() {
           finalTarget  = clampInt(finalTarget, b.minLimit, b.maxLimit);
         }
         _bus->setPosition(b.servoId, finalTarget, _app.speed, _app.acc);
-        delay(1); // inter-servo gap — prevents current spike cascade
+        // No inter-servo delay needed at 1Mbaud: each setPosition takes ~120µs
+        // and the bus goes idle naturally between packets. The 1ms delay was a
+        // conservative guard against voltage spikes; with a proper PSU and the
+        // faster 8ms tick interval it is no longer needed and wastes 6ms/tick.
       }
     }
   }
@@ -1195,15 +1215,18 @@ void App::handleModeWarnInput(int delta, bool shortPress, bool longPress) {
 // ---------------------------------------------------------------------------
 void App::handleMidiSetupInput(int delta, bool shortPress, bool longPress) {
   MidiState& m   = _app.midi;
-  // Rows: 0..totalBindings-1 = all bindings, last = Run row
-  int totalRows  = midiTotalBindings(m) + 1;
+  // Rows: 0..totalBindings-1 = all bindings
+  //       totalBindings      = JumpFilter row  (global, always visible)
+  //       totalBindings+1    = Run row
+  int totalRows  = midiTotalBindings(m) + 2;
 
   if (longPress) {
-    if (m.editingCC || m.editingCh || m.editingInv || m.editingSmooth) {
-      m.editingCC     = false;
-      m.editingCh     = false;
-      m.editingInv    = false;
-      m.editingSmooth = false;
+    if (m.editingCC || m.editingCh || m.editingInv || m.editingSmooth || m.editingJumpFilter) {
+      m.editingCC          = false;
+      m.editingCh          = false;
+      m.editingInv         = false;
+      m.editingSmooth      = false;
+      m.editingJumpFilter  = false;
     } else {
       m.active = false;
       markDirty();
@@ -1213,22 +1236,35 @@ void App::handleMidiSetupInput(int delta, bool shortPress, bool longPress) {
   }
 
   // Navigation when not editing
-  if (!m.editingCC && !m.editingCh && !m.editingInv && !m.editingSmooth) {
+  if (!m.editingCC && !m.editingCh && !m.editingInv && !m.editingSmooth && !m.editingJumpFilter) {
     if (delta != 0)
       m.setupCursor = clampInt(m.setupCursor + delta, 0, totalRows - 1);
 
     if (shortPress) {
-      if (m.setupCursor == midiTotalBindings(m)) {
+      int jumpRow = midiTotalBindings(m);
+      int runRow  = midiTotalBindings(m) + 1;
+      if (m.setupCursor == runRow) {
         // Run row
         m.active      = true;
         m.runCursor   = 0;
         m.showMonitor = false;
         markDirty();
         enterScreen(ScreenId::MidiRun, 0, false);
+      } else if (m.setupCursor == jumpRow) {
+        m.editingJumpFilter = true;
       } else {
         m.editingCC = true; // step 1: CC edit
       }
     }
+    return;
+  }
+
+  // Jump filter editing (global row)
+  if (m.editingJumpFilter) {
+    if (delta != 0) {
+      m.jumpFilter = (uint8_t)clampInt((int)m.jumpFilter + delta, 0, 64);
+    }
+    if (shortPress) { m.editingJumpFilter = false; markDirty(); }
     return;
   }
 
@@ -1251,7 +1287,6 @@ void App::handleMidiSetupInput(int delta, bool shortPress, bool longPress) {
     }
     if (shortPress) {
       m.editingCh = false;
-      // Global bindings (speed/acc/smooth) skip invert and smooth steps
       uint8_t sid = m.bindings[m.setupCursor].servoId;
       bool isGlobal = (sid == MIDI_GLOBAL_SPEED || sid == MIDI_GLOBAL_ACC ||
                        sid == MIDI_GLOBAL_SMOOTH);
@@ -1292,8 +1327,11 @@ void App::handleMidiSetupInput(int delta, bool shortPress, bool longPress) {
 // ---------------------------------------------------------------------------
 void App::handleMidiRunInput(int delta, bool shortPress, bool longPress) {
   MidiState& m = _app.midi;
-  // Rows: 0..totalBindings-1 = servo+global, totalBindings = Monitor, totalBindings+1 = Panic
-  int totalRows = midiTotalBindings(m) + 2;
+  // Rows: 0..totalBindings-1 = servo+global bindings
+  //       totalBindings     = Mode row  (NEW)
+  //       totalBindings+1   = Monitor row
+  //       totalBindings+2   = Panic row
+  int totalRows = midiTotalBindings(m) + 3;
 
   if (longPress) {
     if (m.showMonitor) {
@@ -1307,7 +1345,6 @@ void App::handleMidiRunInput(int delta, bool shortPress, bool longPress) {
   }
 
   if (m.showMonitor) {
-    // In full-screen monitor view: short press or turn goes back
     if (shortPress || delta != 0) m.showMonitor = false;
     return;
   }
@@ -1316,14 +1353,26 @@ void App::handleMidiRunInput(int delta, bool shortPress, bool longPress) {
     m.runCursor = clampInt(m.runCursor + delta, 0, totalRows - 1);
 
   if (shortPress) {
-    int monitorRow = midiTotalBindings(m);
-    int panicRow   = midiTotalBindings(m) + 1;
-    if (m.runCursor == monitorRow) {
-      m.showMonitor = true;            // enter full-screen monitor
+    int modeRow    = midiTotalBindings(m);
+    int monitorRow = midiTotalBindings(m) + 1;
+    int panicRow   = midiTotalBindings(m) + 2;
+    if (m.runCursor == modeRow) {
+      // Cycle through modes
+      MidiRunMode prev = m.runMode;
+      m.runMode = (MidiRunMode)(((uint8_t)m.runMode + 1) % MIDI_RUN_MODE_COUNT);
+      markDirty();
+      // SendOnly = hand-driven recording mode — torque must be off so the arm
+      // can be moved freely. Disable torque on all servos when entering this mode.
+      if (m.runMode == MidiRunMode::SendOnly && prev != MidiRunMode::SendOnly) {
+        _app.torqueEnabled = false;
+        for (uint8_t s = 0; s < _app.servoCount; ++s)
+          _bus->torqueEnable(_app.ids[s], false);
+      }
+    } else if (m.runCursor == monitorRow) {
+      m.showMonitor = true;
     } else if (m.runCursor == panicRow) {
-      m.panic = true;                  // trigger panic
+      m.panic = true;
     }
-    // short press on servo rows does nothing
   }
 }
 
@@ -1451,12 +1500,14 @@ void App::render() {
       break;
     case ScreenId::MidiSetup: {
       int editStep = 0;
-      if      (_app.midi.editingCC)     editStep = 1;
-      else if (_app.midi.editingCh)     editStep = 2;
-      else if (_app.midi.editingInv)    editStep = 3;
-      else if (_app.midi.editingSmooth) editStep = 4;
+      if      (_app.midi.editingCC)          editStep = 1;
+      else if (_app.midi.editingCh)          editStep = 2;
+      else if (_app.midi.editingInv)         editStep = 3;
+      else if (_app.midi.editingSmooth)      editStep = 4;
+      else if (_app.midi.editingJumpFilter)  editStep = 5;
       _ui.drawMidiSetup(_app.midi.bindings, _app.midi.bindingCount,
-                        _app.midi.setupCursor, editStep, _midi.isMounted());
+                        _app.midi.setupCursor, editStep,
+                        _app.midi.jumpFilter, _midi.isMounted());
       break;
     }
     case ScreenId::MidiRun:
@@ -1464,6 +1515,7 @@ void App::render() {
                       _app.midi.runCursor,
                       _midi.isMounted(),
                       _app.midi.showMonitor,
+                      _app.midi.runMode,
                       _app.midi.log,
                       _app.midi.logHead);
       break;

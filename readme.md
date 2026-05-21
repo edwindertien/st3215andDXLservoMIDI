@@ -3,6 +3,8 @@
 A standalone servo configuration, control, and MIDI integration tool for **Waveshare ST3215**, **Dynamixel MX series (Protocol 1.0)**, and **Dynamixel X series (Protocol 2.0)** serial bus servos.  
 Built on a **Raspberry Pi Pico (RP2040)** with a rotary encoder knob, OLED display, and USB MIDI — no PC required once flashed.
 
+Designed for robotics and kinetic art: record arm motion as MIDI into a DAW, then play it back on the arm with full bidirectional CC integration.
+
 ![Wiring Diagram](images/wiring_diagram.svg)
 
 ---
@@ -31,6 +33,7 @@ Built on a **Raspberry Pi Pico (RP2040)** with a rotary encoder knob, OLED displ
    - [Live Control](#live-control)
    - [Configuration](#configuration)
    - [MIDI Mode](#midi-mode)
+   - [MIDI Run Modes](#midi-run-modes)
    - [Flash Diagnostics](#flash-diagnostics)
 8. [MIDI Reference](#midi-reference)
 9. [Persistent Storage](#persistent-storage)
@@ -58,28 +61,34 @@ Built on a **Raspberry Pi Pico (RP2040)** with a rotary encoder knob, OLED displ
 - **USB MIDI device** — appears as Class-Compliant MIDI on Windows/macOS/Linux with no driver needed
 - **USB CDC serial simultaneously** — debug output and serial commands available alongside MIDI on the same USB connection
 - **Per-servo CC mapping** — assign any CC number and MIDI channel to each detected servo
-- **Bidirectional** — inbound CC moves servos; outgoing CC reflects actual position in real time
+- **Bidirectional** — inbound CC moves servos; outgoing CC reflects actual position in real time (~21 Hz per servo with 6 servos at 1 Mbaud)
 - **Inverted mapping** — optionally invert the CC→position scaling per servo
-- **IIR smoothing filter** — per-servo adjustable low-pass filter (0=off, 127=very slow)
-- **Global CC parameters** — Speed, Acceleration, and Smoothing each mappable as MIDI CC
+- **IIR smoothing filter** — per-servo adjustable low-pass filter (0=off, 127=very slow); filter continues converging to the final target after the last CC message arrives
+- **Global CC parameters** — Speed, Acceleration, and Smoothing each mappable as MIDI CC; changing speed/acc does not disrupt servo positions
+- **Jump filter** — global threshold (0–64, default off) that rejects sudden CC jumps larger than N steps; blocks Ableton's default CC=0 on empty tracks while letting gradual movements pass through unchanged
+- **MIDI run modes** — three modes selectable live during MIDI Run:
+  - **Send+Recv** — full bidirectional (default)
+  - **Send only** — arm sends positions for DAW recording; torque automatically disabled so arm moves freely by hand
+  - **Recv only** — arm executes DAW playback; suppresses outgoing CC to prevent feedback loops
 - **MIDI monitor** — scrollable ring buffer showing last 4 messages: CC, Note On/Off, Pitch Bend, Program Change, Aftertouch
 - **MIDI panic** — sends CC 121 + CC 123 on all 16 channels
 
 ### System
-- **Persistent configuration** — servo list, protocol, scan baud, torque, speed, acc, and all MIDI bindings saved to LittleFS; restored on boot without rescanning
+- **Persistent configuration** — servo list, protocol, scan baud, torque, speed, acc, all MIDI bindings, run mode, and jump filter saved to LittleFS; restored on boot without rescanning
 - **Flash diagnostics screen** — inspect LittleFS health, file size, magic/version check, saved servo/MIDI counts
 - **Status LED** — amber during boot, green when idle, amber when MIDI active (XIAO build only)
+- **Boot diagnostics** — serial terminal reports `oledOk` and `encoderOk` status at boot
 
 ---
 
 ## Hardware
 
-Two hardware configurations are supported, selected at compile time via the PlatformIO environment:
+Two hardware configurations are supported, selected at compile time via the PlatformIO environment. Both use the **M5Stack Unit Encoder** (single knob).
 
-| Environment | Board | Display | Encoder |
-|---|---|---|---|
-| `env:pico` | Raspberry Pi Pico + Grove Shield | M5Stack OLED 1.3″ (SH1107, 64×128) on I2C0 | M5Stack Unit Encoder on I2C1 |
-| `env:xiao_rp2040` | Seeed XIAO RP2040 + Expansion Board | SSD1306 128×64 on I2C (Wire) | M5Stack 8-Unit Encoder on same I2C bus |
+| Environment | Board | Display | Encoder | I2C layout |
+|---|---|---|---|---|
+| `env:pico` | Raspberry Pi Pico + Grove Shield | M5Stack OLED 1.3″ (SH1107, 64×128) | Unit Encoder on I2C1 | Two independent buses (OLED on I2C0, encoder on I2C1) |
+| `env:xiao_rp2040` | Seeed XIAO RP2040 + Expansion Board | SSD1306 128×64 | Unit Encoder on I2C0 | Single shared bus (OLED + encoder on Wire) |
 
 ### Bill of Materials (Pico + Grove Shield build)
 
@@ -89,10 +98,9 @@ Two hardware configurations are supported, selected at compile time via the Plat
 | 2 | **Grove Shield for Pi Pico v1.0** | Seeed Studio |
 | 3 | **M5Stack Unit OLED 1.3″** (SH1107, 128×64) | I2C address 0x3C |
 | 4 | **M5Stack Unit Encoder** (STM32F030, 30 pos/rev, RGB LED) | I2C address 0x40 |
-| 5 | **RS-485 adapter board** | Auto-direction (TX-controlled); connects to UART0 |
-| 6 | Servos: ST3215, MX-28R/64R, or XH/XM series | One or more, same bus |
+| 5 | **RS-485 adapter board** | Auto-direction (TX-controlled); no direction pin needed |
+| 6 | Servos: ST3215, MX-28R/64R, or XH/XM series | One or more, daisy-chained on same bus |
 | 7 | DC supply for servos (voltage per servo spec) | Shared GND with Pico mandatory |
-
 
 ![grove shield by SEEED](images/pi-pico-w-pinout-3579354621.jpg)
 
@@ -117,28 +125,32 @@ Two hardware configurations are supported, selected at compile time via the Plat
 | M5Stack OLED (SH1107) | `0x3C` | `Wire` (I2C0, GP4/GP5) |
 | M5Stack Encoder | `0x40` | `Wire1` (I2C1, GP6/GP7) |
 
+> **XIAO note:** On the XIAO expansion board the UART Grove port (GP0/GP1) and I2C Grove port (GP6/GP7) look identical and sit next to each other. Always plug the servo adapter into the port labelled **UART**, not I2C.
+
 ---
 
 ### Wiring Notes
 
 **Grove Shield power switch** — set to **3.3 V** before connecting. Both OLED and Encoder are 3.3 V devices.
 
-**RS-485 adapter** — use an auto-direction (TX-controlled) adapter with no separate DE/RE pins. The adapter automatically switches TX/RX based on UART TX line activity. Half-duplex operation means your TX bytes are echoed back to RX; the firmware handles this echo cancellation automatically for all three protocols.
+**RS-485 / TTL adapters** — use an auto-direction adapter with no separate DE/RE pin. The adapter switches TX/RX direction based on the UART TX line. TX bytes are echoed back to RX; the firmware handles echo cancellation automatically for all three protocols.
 
-**UART wiring is straight-through** — `GP0 (TX) → T`, `GP1 (RX) → R`. The adapter handles half-duplex bus arbitration.
+**UART wiring is straight-through** — `GP0 (TX) → T`, `GP1 (RX) → R`.
 
 **Shared ground is mandatory** — servo power supply, RS-485 adapter, and Pico must share a common GND.
 
-**USB carries both MIDI and serial** — the Pico enumerates as a composite USB device: USB MIDI + USB CDC serial. Connect with any serial terminal at 115200 baud to see debug output and send commands while MIDI remains active.
+**USB carries both MIDI and serial** — the Pico enumerates as a composite device: USB MIDI + USB CDC serial. Connect a serial terminal at 115200 baud to see debug output and send commands while MIDI remains active.
+
+**I2C clock** — both environments run at 400 kHz. The Pico build uses dedicated buses for OLED and encoder so there is no bus contention. The XIAO build shares one bus; 400 kHz keeps the OLED frame time short enough that encoder polling latency is negligible.
 
 ---
 
 ## Supported Servo Protocols
 
-Select the active protocol from **Home → Protocol**. The protocol and its last-used baud index are persisted across power cycles.
+Select the active protocol from **Home → Protocol**. The protocol and last-used baud index are persisted across power cycles.
 
 ### ST3215 / STS / SMS (default)
-Waveshare/Feetech serial bus servos. Uses the SCServo library. Factory baud: **1,000,000**.
+Waveshare/Feetech serial bus servos. Uses the SCServo library with `EchoSMS_STS` subclass that drains the TX echo before reading responses (required for auto-direction adapters). Factory baud: **1,000,000**.
 
 | Index | Baud |
 |---|---|
@@ -181,7 +193,7 @@ Dynamixel RS-485 X series. Factory baud: **57,600** (register index 1).
 | 6 | 4,000,000 |
 | 7 | 4,500,000 |
 
-> **DXL2 torque behaviour:** The XH/XM series locks EEPROM registers when torque is enabled. The firmware automatically disables torque when entering the Configure menu, and always starts Live Control with torque off — the user must explicitly enable it.
+> **DXL2 torque behaviour:** The XH/XM series locks EEPROM registers when torque is enabled. The firmware automatically disables torque when entering the Configure menu, and always starts Live Control with torque off.
 
 ---
 
@@ -193,7 +205,7 @@ Dynamixel RS-485 X series. Factory baud: **57,600** (register index 1).
 |--------|--------|
 | **Turn knob** | Scroll menu / increment or decrement value when editing |
 | **Short press** | Select item / enter edit mode / confirm edit |
-| **Long press** | Cancel edit (restores previous value) / go back to Home |
+| **Long press** | Cancel edit / go back to Home |
 
 ---
 
@@ -201,21 +213,21 @@ Dynamixel RS-485 X series. Factory baud: **57,600** (register index 1).
 
 | Screen | Access | Purpose |
 |--------|--------|---------|
-| **Home** | Boot / Long press from anywhere | Top-level menu with 9 items |
+| **Home** | Boot / Long press from anywhere | Top-level menu |
 | **Select Protocol** | Home → Protocol | Choose ST3215 / DXL MX (P1.0) / DXL X (P2.0) |
 | **Scan Baud Select** | Home → Scan Bus | Choose baud rate or Scan All |
-| **Scanning…** | After selecting single baud | Progress bar ID 0–253; **Long press = stop early** |
+| **Scanning…** | After selecting single baud | Progress bar ID 0–253; Long press = stop early |
 | **Scan All Bauds** | Scan Baud Select → Scan All | Dual progress: outer=baud, inner=ID |
 | **Select Servo** | Home → Select Servo | Scroll found IDs; short press to make active |
 | **Live Control** | Home → Live Control | Real-time: Torque · Position · Speed · Acceleration |
-| **Servo Info** | Home → Servo Info | Page 1: Online/Position/Voltage/Temp — short press for page 2 |
+| **Servo Info** | Home → Servo Info | Page 1: Online/Position/Voltage/Temp |
 | **Faults** | Servo Info → Short press | Load %, Current (mA), decoded fault flags |
 | **Configure** | Home → Configure | Edit EPROM parameters (7 rows) |
 | **⚠ Wheel Mode** | Configure → Mode | Safety confirmation before enabling continuous rotation |
 | **Confirm Save?** | Home → Save Changes | Summary of staged config; No / Yes |
 | **Save Result** | After confirming save | OK or failure message |
-| **MIDI Setup** | Home → MIDI Mode | Assign CC/channel/invert/smooth per servo |
-| **MIDI Run** | MIDI Setup → Run | Live TX/RX indicators; Monitor and Panic rows |
+| **MIDI Setup** | Home → MIDI Mode | Assign CC/channel/invert/smooth per servo; set jump filter |
+| **MIDI Run** | MIDI Setup → Run | Live TX/RX indicators; Mode · Monitor · Panic rows |
 | **MIDI Monitor** | MIDI Run → MIDI Monitor | Last 4 received MIDI messages |
 | **Flash Diag** | Home → Flash Diag | LittleFS health, file size, saved counts |
 
@@ -236,7 +248,7 @@ Dynamixel RS-485 X series. Factory baud: **57,600** (register index 1).
 [env:pico]          ; Raspberry Pi Pico + Grove Shield
 board = pico
 
-[env:xiao_rp2040]   ; Seeed XIAO RP2040 + Expansion Board  (default)
+[env:xiao_rp2040]   ; Seeed XIAO RP2040 + Expansion Board
 board = seeed_xiao_rp2040
 ```
 
@@ -248,8 +260,8 @@ pio run -e pico -t upload
 ### Project Setup in VSCode / PlatformIO
 
 1. Open the project folder (`File → Open Folder` → directory with `platformio.ini`).
-2. PlatformIO auto-detects the project and installs dependencies.
-3. Library dependencies (fetched automatically):
+2. PlatformIO auto-detects the project and installs dependencies automatically.
+3. Library dependencies:
 
 ```ini
 lib_deps =
@@ -262,26 +274,23 @@ lib_deps =
 ```
 
 4. Platform: **Earle Philhower RP2040 Arduino core** via maxgerhardt's platform wrapper.
-5. Both environments run at **120 MHz** (`board_build.f_cpu = 120000000L`).
-6. USB enumerates as composite MIDI + CDC:
+5. Both environments run at **120 MHz**.
+6. USB enumerates as composite MIDI + CDC via build flags:
 ```ini
-build_flags =
-    -D USE_TINYUSB
-    -D CFG_TUD_CDC=1
-    -D PICO_STDIO_UART=0
+build_flags = -D USE_TINYUSB -D CFG_TUD_CDC=1 -D PICO_STDIO_UART=0
 ```
 
 ### Building and Flashing
 
 **Method 1 — PlatformIO toolbar**
-1. Select the correct environment in the bottom status bar (`env:pico` or `env:xiao_rp2040`).
+1. Select the correct environment in the bottom status bar.
 2. Click **✓ Build**.
 3. Hold **BOOTSEL** on the Pico, plug in USB, release.
-4. Click **→ Upload** — PlatformIO uses `picotool`.
+4. Click **→ Upload**.
 
 **Method 2 — Manual drag-and-drop**
-1. Build the project. Output: `.pio/build/pico/firmware.uf2`
-2. Enter BOOTSEL mode; copy `firmware.uf2` to the `RPI-RP2` drive.
+1. Build → `.pio/build/pico/firmware.uf2`
+2. Enter BOOTSEL mode; copy the `.uf2` to the `RPI-RP2` drive.
 
 ---
 
@@ -292,9 +301,9 @@ build_flags =
 3. Connect OLED (Grove cable) to **I2C0** port.
 4. Connect Encoder (Grove cable) to **I2C1** port.
 5. Wire RS-485 adapter: `GP0→T`, `GP1→R`, `GND→G`.
-6. Connect servos to the adapter's servo port (daisy-chain through twin connectors).
+6. Connect servos to the adapter's servo port (daisy-chain).
 7. Power the adapter/servos from a suitable DC supply.
-8. Power the Pico via USB. The device boots and is immediately available as USB MIDI + USB serial.
+8. Power the Pico via USB.
 
 ---
 
@@ -302,9 +311,9 @@ build_flags =
 
 ### First Boot
 
-On first boot after flashing, no saved state exists. The device scans at the protocol's default baud. After scanning, state is saved to LittleFS. Subsequent boots restore the saved servo list without scanning.
+On first boot with no saved state the device scans at the protocol's default baud. After scanning, all state is saved to LittleFS. Subsequent boots restore the saved servo list, MIDI bindings, and run mode without rescanning.
 
-The OLED shows `"Restored — N servo(s)"` when loading from flash, or `"Scanning bus..."` on a fresh flash.
+The OLED shows `"Restored — N servo(s)"` on successful load, or `"Scanning bus..."` on a fresh flash.
 
 ---
 
@@ -312,9 +321,7 @@ The OLED shows `"Restored — N servo(s)"` when loading from flash, or `"Scannin
 
 **Home → Protocol**
 
-Turn to scroll through `ST3215 / STS`, `DXL MX (P1.0)`, `DXL X (P2.0)`. Short press to apply. The firmware switches the bus driver, resets the baud index to the protocol's factory default, and prompts for a scan.
-
-After switching protocol, run **Scan Bus** to find servos at the new protocol's baud rate.
+Turn to scroll through `ST3215 / STS`, `DXL MX (P1.0)`, `DXL X (P2.0)`. Short press to apply. The firmware switches the bus driver, resets the baud index to that protocol's factory default, and prompts for a scan.
 
 ---
 
@@ -322,11 +329,9 @@ After switching protocol, run **Scan Bus** to find servos at the new protocol's 
 
 **Home → Scan Bus → Scan Baud Select**
 
-Turn to select a baud rate from the active protocol's table, or scroll to `>> Scan All <<`.
-
 - **Single baud scan** — sweeps IDs 0–253 at the selected rate.
-- **Scan All** — iterates all baud rates in sequence. Two progress bars show baud step and ID sweep.
-- **Long press during any scan** — stops early, keeps servos found so far.
+- **Scan All** — iterates every baud rate in the protocol's table. Dual progress bars show baud step and ID sweep.
+- **Long press during scan** — stops early, keeps servos found so far.
 
 After scanning, the first found servo becomes active and its EPROM config is loaded.
 
@@ -342,12 +347,12 @@ Four rows — short press enters edit, turn to change, short press to confirm, l
 |-----|-------|------|-------|
 | Torque | ON / OFF | toggle | Immediately sent to servo |
 | Position (T:) | 0–4095 | 8 | Degrees shown on right; actual (A:) shown inline |
-| Speed (Spd:) | 0–4095 | 10 | Re-sends position at new speed |
-| Acceleration (Acc:) | 0–254 | 1 | Re-sends position at new acc |
+| Speed (Spd:) | 0–4095 | 10 | |
+| Acceleration (Acc:) | 0–254 | 1 | |
 
-A position bar at the bottom shows target (thin line) and actual (filled block) within min–max limits, with hatched areas outside the servo limits.
+A position bar shows target (thin line) vs actual (filled block) within min–max limits, with hatched areas outside servo limits.
 
-> **DXL2 note:** Live Control always starts with **Torque OFF** for DXL2 servos. You must explicitly enable torque before the servo will move. This is by design — the XH/XM series requires torque to be off for safe EEPROM access, and starting with torque off prevents unexpected movement on entry.
+> **DXL2 note:** Live Control always starts with **Torque OFF**. Enable it explicitly before the servo will move.
 
 ---
 
@@ -367,13 +372,11 @@ A position bar at the bottom shows target (thin line) and actual (filled block) 
 | Mode | Servo / Wheel | toggle | ⚠ Wheel mode warning |
 | Baud | Baud rate index | 0–7 | 1 |
 
-Changes are **staged** and only written to servo EPROM via **Home → Save Changes**. A `*` in the header indicates unsaved changes.
+Changes are **staged** — written to servo EPROM only via **Home → Save Changes**. A `*` in the header indicates unsaved changes.
 
-> **DXL2 note:** When entering Configure with torque currently ON, the firmware automatically disables torque and shows `"Torque disabled / req. for DXL2"` for 1.2 seconds. This is required — the XH/XM series ignores all EEPROM writes while torque is enabled.
+> **DXL2 note:** Entering Configure with torque ON automatically disables torque and shows a notice. The XH/XM series silently ignores all EEPROM writes while torque is enabled.
 
-> **Wheel mode warning:** Disables position limits. If the servo is mechanically constrained, enabling wheel mode can cause stall and burnout. The warning screen defaults to `No`.
-
-> **Baud rate change:** After saving, the firmware switches the bus to the new baud immediately. The servo reboots at the new rate. The new baud index is persisted so the next scan finds the servo at the correct rate automatically.
+> **Baud rate change:** After saving, the firmware immediately switches to the new baud and persists the scan baud index so the next scan finds the servo automatically.
 
 ---
 
@@ -381,9 +384,11 @@ Changes are **staged** and only written to servo EPROM via **Home → Save Chang
 
 **Home → MIDI Mode**
 
-The Pico appears as a USB MIDI device in your DAW or MIDI host. No driver needed.
+The Pico appears as a USB MIDI device in your DAW. No driver needed.
 
-Each servo binding row is editable in 4 steps (short press advances, long press cancels):
+**MIDI Setup screen rows:**
+
+Each servo binding is editable in 4 sequential steps (short press advances through steps, long press cancels):
 
 | Step | Field | Range |
 |------|-------|-------|
@@ -392,7 +397,7 @@ Each servo binding row is editable in 4 steps (short press advances, long press 
 | 3 | Invert | I / - |
 | 4 | Smoothing | 0–127 |
 
-Three global rows (always present below servo rows):
+Below the servo rows, three global parameter rows:
 
 | Row | Maps to |
 |-----|---------|
@@ -400,7 +405,35 @@ Three global rows (always present below servo rows):
 | **Acc** | Global acceleration — CC 0–127 → acc 0–254 |
 | **Smt** | Global smoothing — sets all per-servo smoothing values |
 
-Scroll to `>Run<` and short press to start MIDI Run.
+Then one global filter row:
+
+| Row | Function |
+|-----|----------|
+| **JmpFlt** | Jump filter threshold (0=off, 1–64). Incoming CC is rejected if it jumps more than this many steps from the last accepted value. Blocks Ableton's default CC=0 on empty/unrecorded tracks. Gradual movements pass through normally. |
+
+Scroll to `>Run<` and short press to enter MIDI Run.
+
+---
+
+### MIDI Run Modes
+
+In **MIDI Run**, scroll to the **Mode** row and short press to cycle through three modes:
+
+| Mode | Behaviour | Typical use |
+|------|-----------|-------------|
+| **Send+Recv** | Arm sends positions as CC; incoming CC moves arm | Normal real-time control |
+| **Send only** | Arm sends positions; incoming CC ignored; **torque disabled automatically** | Hand-drive the arm to record motion into DAW |
+| **Recv only** | Arm executes incoming CC; no outgoing CC | Play back recorded DAW animation without feedback |
+
+**Recording workflow (arm → DAW → arm):**
+
+1. Set mode to **Send only** — torque turns off, arm goes limp for free movement
+2. Move the arm by hand; DAW records the CC stream
+3. Set mode to **Recv only** — arm listens to DAW playback, no CC sent back
+4. Play the DAW automation — arm reproduces the recorded motion
+5. Use the **Jump filter** (JmpFlt) in MIDI Setup to block CC=0 spikes at the start/end of empty DAW tracks
+
+> **Ableton monitoring note:** Even in Send+Recv mode, feedback loops can be managed in Ableton by disabling input monitoring on the track that drives the arm.
 
 ---
 
@@ -410,15 +443,15 @@ Scroll to `>Run<` and short press to start MIDI Run.
 
 ```
 Flash Diag
-FS:OK 2/256K          ← mounted, 2 KB used of 256 KB reserved
-File:142B exp:142B    ← file exists, correct size
-Magic:OK              ← header matches
-Ver:6 OK exp:6        ← version matches current firmware
-Srv:3 MIDI:2          ← 3 servos, 2 MIDI bindings saved
+FS:OK 2/256K
+File:148B exp:148B
+Magic:OK
+Ver:10 OK exp:10
+Srv:6 MIDI:6
 ```
 
-If `FS:FAIL` appears: check `board_build.filesystem_size = 256k` in platformio.ini.  
-If `Ver:BAD` appears: saved data is from an older firmware version — device rescans once and writes fresh data.
+If `FS:FAIL`: check `board_build.filesystem_size = 256k` in `platformio.ini`.  
+If `Ver:BAD`: firmware was updated — device rescans once and writes fresh data automatically.
 
 ---
 
@@ -426,11 +459,11 @@ If `Ver:BAD` appears: saved data is from an older firmware version — device re
 
 ### Scaling
 
-**Position → CC (outgoing):**  
+**Position → CC (outgoing TX):**  
 `CC = map(clamp(pos, minLimit, maxLimit), minLimit, maxLimit, 0, 127)`  
 If inverted: `CC = 127 − CC`
 
-**CC → Position (incoming):**  
+**CC → Position (incoming RX):**  
 If inverted: `CC = 127 − CC`  
 `pos = map(CC, 0, 127, minLimit, maxLimit)`
 
@@ -448,29 +481,41 @@ where `α = (128 − smoothing) / 128`
 | 64 | 0.5 | Moderate lag |
 | 127 | ≈0.008 | Very slow |
 
-### Rate Limiting
+The filter keeps advancing toward the last target even after CC messages stop arriving, so the servo always reaches its final position.
 
-- **Outgoing (TX):** one servo polled per 25 ms, round-robin. N servos → each updates at 1000/(25×N) Hz.
-- **Incoming (RX):** only the most recent CC value in each 25 ms window is applied. USB MIDI receive rate is decoupled from servo bus write rate.
+### Jump Filter
+
+`abs(newCC − lastAcceptedCC) > jumpFilter` → CC rejected.  
+`jumpFilter = 0` → disabled (accept all). `jumpFilter = 64` → maximum filtering.  
+A value of 20–30 is a good starting point for blocking Ableton empty-track CC=0 spikes.
+
+### Update Rates (6 servos, 1 Mbaud ST3215)
+
+| Path | Interval | Rate per servo |
+|------|----------|----------------|
+| TX (outgoing CC) | 8 ms per servo polled | ~21 Hz per servo |
+| RX (incoming CC applied) | 8 ms tick | ~125 Hz |
 
 ---
 
 ## Persistent Storage
 
-Saved to **LittleFS** (`/config.bin`, 256 KB reserved). Written with temp-file rename for atomicity.
+Saved to **LittleFS** (`/config.bin`, 256 KB reserved). Written atomically via temp-file rename.
 
-| Data | Trigger |
-|------|---------|
+| Data | Save trigger |
+|------|-------------|
 | Servo ID list + active index | After every scan |
 | Active protocol | On protocol switch |
-| Scan baud index | After scan or baud change save |
+| Scan baud index | After scan or baud-change save |
 | Torque on/off | When toggled in Live Control |
 | Speed, Acceleration | When changed in Live Control or via MIDI |
-| All MIDI bindings | When leaving MIDI Setup or starting Run |
+| All MIDI bindings (CC, channel, invert, smoothing) | When leaving MIDI Setup or entering Run |
+| MIDI run mode (Send+Recv / Send only / Recv only) | When mode changed in MIDI Run |
+| Jump filter value | When edited in MIDI Setup |
 
-**Not saved here** (lives in servo EPROM): Min/Max limits, Torque limit, Center offset, Mode, Baud rate, Servo ID. Written by **Save Changes**.
+**Not saved in flash** (lives in servo EPROM): Min/Max limits, Torque limit, Center offset, Mode, Baud rate, Servo ID. Written by **Save Changes**.
 
-**Version:** `PERSIST_VERSION = 6`. Version mismatch triggers automatic rescan and fresh save.
+**Current version:** `PERSIST_VERSION = 10`. Version mismatch triggers automatic rescan and fresh save.
 
 ---
 
@@ -505,7 +550,7 @@ Saved to **LittleFS** (`/config.bin`, 256 KB reserved). Written with temp-file r
 | Parameter | Address | Range |
 |-----------|---------|-------|
 | Servo ID | 7 | 0–252 |
-| Baud Rate | 8 | 0–7 (index, see table above) |
+| Baud Rate | 8 | 0–7 (index) |
 | Drive Mode | 10 | — |
 | Operating Mode | 11 | 3=Position, 1=Velocity, 16=Extended |
 | Homing Offset | 20 (dword) | signed |
@@ -515,13 +560,9 @@ Saved to **LittleFS** (`/config.bin`, 256 KB reserved). Written with temp-file r
 | Torque Enable | 64 | 0/1 — **must be 0 to write EEPROM** |
 | Present Position | 132 (dword) | 0–4095 |
 
-> **DXL2 EEPROM write requirement:** All parameters at addresses 0–63 are EEPROM. The servo silently ignores writes to these addresses while Torque Enable (addr 64) = 1. Always disable torque before saving configuration.
-
 ---
 
 ## Fault Codes
-
-Mapped from servo hardware error registers to a common 6-bit layout:
 
 | Bit | Fault | ST3215 | DXL1 (MX) | DXL2 (X) |
 |-----|-------|--------|-----------|----------|
@@ -536,16 +577,18 @@ Mapped from servo hardware error registers to a common 6-bit layout:
 
 ## Serial Debug Commands
 
-Connect a serial terminal to the USB CDC port at **115200 baud**. Available at any time alongside MIDI.
+Connect a serial terminal to the USB CDC port at **115200 baud**. All commands are available alongside MIDI.
 
 | Command | Action |
 |---------|--------|
 | `p` | DXL2 raw ping ID=1 @ 57600 |
 | `b` | DXL2 broadcast ping @ 57600 |
-| `d` | DXL1 ping ID=1 via `dxl1Bus` @ 57142 (driver-level, with telemetry on success) |
-| `e` | DXL1 raw loopback test @ 57142 (bypasses driver — confirms RS-485 adapter RX path) |
-| `a` | DXL2 raw ping ID=1 on all baud rates (buffered capture with µs timestamps) |
-| `w` | DXL2 exact Wizard ping @ 1Mbaud, hardcoded packet `FF FF FD 00 01 03 00 01 19 4E` |
+| `d` | DXL1 ping ID=1 via `dxl1Bus` @ 57142 (driver-level, with telemetry) |
+| `e` | DXL1 raw loopback test @ 57142 (buffered capture, µs timestamps) |
+| `a` | DXL2 raw ping ID=1 on all baud rates (buffered capture, µs timestamps) |
+| `w` | DXL2 exact Wizard ping @ 1Mbaud — hardcoded `FF FF FD 00 01 03 00 01 19 4E` |
+
+All debug commands perform servo bus operations **before** printing to serial, so USB CDC blocking never delays the capture window.
 
 ---
 
@@ -554,29 +597,32 @@ Connect a serial terminal to the USB CDC port at **115200 baud**. Available at a
 ```
 servo-tester/
 ├── platformio.ini
+├── README.md
+├── context.md                      Developer notes, architecture, bug history
 └── src/
     ├── main.cpp                    Hardware init · USB MIDI+CDC · boot sequence
     │                               Serial debug commands · passthrough mode
-    ├── config.h                    All pin and address constants (both board variants)
+    ├── config.h                    Pin/address constants for both board variants
     ├── app_state.h                 AppState struct (runtime state)
     ├── model/
     │   └── servo_model.h           Enums · baud tables · ServoConfigBuffer
-    │                               MidiServoBinding · MidiState · UsbHostState
+    │                               MidiServoBinding · MidiState · MidiRunMode
     ├── app/
     │   ├── app.h                   App class declaration
     │   └── app.cpp                 State machine · input handlers · scan logic
-    │                               MIDI tick · smoothing · persistence · protocol switch
+    │                               MIDI tick · smoothing · jump filter · run modes
+    │                               persistence · protocol switch
     └── drivers/
         ├── iservo_bus.h            IServoBus pure-virtual interface
-        ├── servo_bus.h / .cpp      ST3215 / STS / SMS implementation (SCServo wrapper)
+        ├── servo_bus.h / .cpp      ST3215/STS/SMS (EchoSMS_STS subclass for echo drain)
         ├── dxl1_bus.h / .cpp       Dynamixel Protocol 1.0 (MX series RS-485)
         ├── dxl2_bus.h / .cpp       Dynamixel Protocol 2.0 (XH/XM series RS-485)
-        ├── oled_ui.h / .cpp        All OLED screen rendering (supports SH1107 + SSD1306)
+        ├── oled_ui.h / .cpp        OLED rendering (SH1107 + SSD1306)
         ├── midi_engine.h / .cpp    TinyUSB MIDI · CC/Note/PB/PC/AT callbacks
         ├── persist.h / .cpp        LittleFS save/load · diagnostics
-        ├── encoder_unit.h / .cpp   M5Stack Unit Encoder I2C driver (single)
-        ├── encoder_8unit.h / .cpp  M5Stack 8-Unit Encoder I2C driver
-        ├── usb_host_engine.h/.cpp  USB Host input (HID/MIDI host via PIO-USB)
+        ├── encoder_unit.h / .cpp   M5Stack Unit Encoder I2C driver
+        ├── encoder_8unit.h / .cpp  M5Stack 8-Unit Encoder I2C driver (unused)
+        ├── usb_host_engine.h/.cpp  USB Host (PIO-USB, not yet active)
         └── iencoder.h              IEncoder pure-virtual interface
 ```
 
@@ -606,24 +652,29 @@ servo-tester/
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
-| OLED blank | Wrong I2C port or address | Pico build: OLED on I2C0 (GP4/GP5), addr 0x3C; shield power → 3.3 V |
-| Encoder unresponsive | Wrong I2C port | Pico build: Encoder on I2C1 (GP6/GP7), addr 0x40 |
+| OLED blank | Wrong I2C port or address | Pico: OLED on I2C0 (GP4/GP5), addr 0x3C; shield power → 3.3 V |
+| Encoder unresponsive | Wrong I2C port | Pico: Encoder on I2C1 (GP6/GP7), addr 0x40 |
 | "No servo" on boot | No saved state, servo not powered | Power servos before Pico; run Scan All |
-| Servo found at wrong baud | Serial1.begin() not reinitialising | Fixed in current firmware (end()+begin() in setBaud) |
-| DXL2 config writes ignored | Torque enabled during save | Firmware auto-disables torque on Configure entry; or disable manually first |
+| ST3215 scan finds all IDs | TX echo not drained | Fixed — `EchoSMS_STS::wFlushSCS()` drains echo after flush() |
+| ST3215 scan finds nothing | Wrong baud or driver/wiring | Check RS-485 wiring; confirm baud with Scan All |
+| Servo found at wrong baud | `Serial1.begin()` not reinitialising | Fixed — `end()+begin()` in all three bus drivers |
+| DXL2 config writes ignored | Torque enabled during save | Firmware auto-disables torque on Configure entry |
 | DXL2 live control unresponsive | Torque starts OFF for DXL2 | Toggle Torque to ON in Live Control |
-| CRC errors on DXL2 | Wrong CRC table | Fixed in current firmware (48 corrected entries in table indices 208–255) |
-| No USB MIDI in DAW | USB init order | MIDI init is first in setup(); ensure latest main.cpp |
-| USB serial and MIDI both present | Expected behaviour | Both appear on same USB connection; serial at 115200 |
-| Scan works but wrong baud rate used | Old baud persisted | Scan baud is persisted; after baud-change save, next scan auto-uses new rate |
-| Boot always scans | Flash not saving | Check Flash Diag; verify `board_build.filesystem_size = 256k` |
-| Flash Diag `Ver:BAD` | Firmware updated | Expected — device rescans once and writes new file |
-| Servo moves jerky | Speed too high or acc too low | Reduce Speed; increase Acc in Live Control |
-| After baud change, servo not found | Old scanBaudIndex in flash | Fixed in current firmware (markDirty on baud change) |
-| Wheel mode won't engage | Safety screen defaults No | Must explicitly turn to Yes on the ⚠ screen |
-| DXL1 ping wrong baud | "57600" is actually 57142 | Firmware uses 57142 (2,000,000/35); Wizard also uses this value for "57600" |
+| DXL2 CRC mismatch | Wrong CRC table | Fixed — 48 corrected entries at indices 208–255 |
+| No USB MIDI in DAW | USB init order | MIDI init is first in setup(); use latest firmware |
+| Boot always rescans | Flash not saving | Check Flash Diag; verify `board_build.filesystem_size = 256k`; ensure `persist.save(cfg)` is present |
+| Flash Diag `Ver:BAD` | Firmware updated | Expected — rescans once, writes new file |
+| Settings lost after power cycle | `persist.save()` not called | Fixed in current firmware |
+| All servos snap to center on speed CC | Speed CC re-sent `_app.targetPos` to all servos | Fixed — speed/acc CC only updates the value, not positions |
+| Arm jittery / unresponsive under MIDI load | IOTimeOut too long; multiple readPosition() calls | Fixed — IOTimeOut=5ms; removed readPosition() from global CC handlers |
+| Servo stops ~95% of the way through a move | Smoothing filter not converging | Fixed — `lastRawTarget` keeps filter advancing after last CC |
+| MIDI recording shows only 5–7 Hz per servo | TX round-robin 25ms × N servos | Fixed — TX/RX intervals reduced to 8ms |
+| JmpFlt row garbled on OLED | Missing `continue` in rendering loop | Fixed in current firmware |
+| Torque still on after switching to Send only | Torque must be disabled for hand recording | Fixed — entering Send only disables torque on all servos |
+| XIAO serial comms not working | RS-485 adapter in I2C Grove port instead of UART | Move adapter to the port labelled UART (GP0/GP1) |
+| DXL1 ping wrong baud | "57600" is actually 57,142 | Firmware uses 57,142 (2,000,000/35) |
 | PlatformIO won't find Pico port | Driver not installed | Install Zadig (Windows) or check udev rules (Linux) |
 
-In some cases the Dynamixal Wizard by Robotis can help, but when screwing up with message return time or non-matching baudrates sometimes it is better to work blind with the last known values and `just send' data..
+In some cases the Dynamixel Wizard by Robotis can help, but when dealing with mismatched baud rates or return delay settings it is sometimes better to work blind with known values and just send data.
 
 ![Dynamixel Wizard debug tool](images/Screenshot%202026-04-11%20at%2021.24.31.png)

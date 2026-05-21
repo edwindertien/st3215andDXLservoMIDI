@@ -73,8 +73,10 @@ struct ServoConfigBuffer {
 // ---------------------------------------------------------------------------
 static constexpr uint8_t  MIDI_CC_NONE        = 255;
 static constexpr int      MIDI_MAX_SERVOS      = 32;
-static constexpr uint32_t MIDI_TX_INTERVAL_MS  = 25;
-static constexpr uint32_t MIDI_RX_INTERVAL_MS  = 25;
+static constexpr uint32_t MIDI_TX_INTERVAL_MS  = 8;   // one servo polled per tick;
+                                                        // N servos → N×8ms per servo
+                                                        // 6 servos → 48ms = ~21 Hz each
+static constexpr uint32_t MIDI_RX_INTERVAL_MS  = 8;   // incoming CC applied at ~125 Hz
 static constexpr int      MIDI_LOG_SIZE        = 4;
 
 // Sentinel servoId values for global parameter bindings
@@ -92,7 +94,7 @@ struct MidiServoBinding {
   uint8_t servoId   = 0xFF;
   uint8_t cc        = MIDI_CC_NONE;
   uint8_t channel   = 1;
-  bool    inverted  = false;   // if true: CC 0→maxPos, CC 127→minPos
+  bool    inverted   = false;   // if true: CC 0→maxPos, CC 127→minPos
   uint8_t smoothing = 0;       // 0=no filter, 127=max (IIR alpha = (128-s)/128)
   float   smoothPos = -1.0f;   // filtered target position (-1 = uninitialised)
   int     lastRawTarget = -1;  // last ccToPos() result; kept so smoothing
@@ -116,8 +118,30 @@ struct MidiLogEntry {
   bool    valid       = false;
 };
 
+// ---------------------------------------------------------------------------
+// MIDI run mode — controls whether TX (arm→DAW) and RX (DAW→arm) are active.
+// Analogous to "Local Control" on synthesizers.
+// ---------------------------------------------------------------------------
+enum class MidiRunMode : uint8_t {
+  SendRecv = 0,  // bidirectional  (default)
+  SendOnly = 1,  // arm sends positions, ignores incoming CC  (record mode)
+  RecvOnly = 2,  // arm receives positions, does not send     (playback mode)
+};
+static constexpr uint8_t MIDI_RUN_MODE_COUNT = 3;
+inline const char* midiRunModeName(MidiRunMode m) {
+  switch (m) {
+    case MidiRunMode::SendOnly: return "Send only";
+    case MidiRunMode::RecvOnly: return "Recv only";
+    default:                    return "Send+Recv";
+  }
+}
+
 struct MidiState {
   bool    active       = false;
+  MidiRunMode runMode  = MidiRunMode::SendRecv; // TX/RX gating
+  uint8_t jumpFilter   = 0;   // max CC delta per tick; 0=off. Blocks sudden
+                               // jumps (e.g. Ableton CC=0 on empty tracks).
+                               // Gradual movements pass through fine.
   bool    panic        = false;
   uint8_t channel      = 1;
   // Per-servo bindings (0..bindingCount-1) followed by global param bindings:
@@ -132,7 +156,8 @@ struct MidiState {
   bool    editingCC     = false;
   bool    editingCh     = false;
   bool    editingInv    = false;  // editing invert flag
-  bool    editingSmooth = false;  // editing smoothing value
+  bool    editingSmooth     = false;  // editing smoothing value
+  bool    editingJumpFilter = false;  // editing global jump filter threshold
   bool    showMonitor   = false;
   uint8_t  txServoIndex = 0;
   uint32_t txNextMs     = 0;

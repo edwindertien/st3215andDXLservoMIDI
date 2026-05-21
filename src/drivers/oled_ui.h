@@ -120,6 +120,7 @@ public:
                      uint8_t count,
                      int selected,
                      int editStep,
+                     uint8_t jumpFilter,
                      bool usbMounted);
 
   // MIDI Run: live activity view with per-servo TX/RX indicators + panic row
@@ -129,6 +130,7 @@ public:
                    int selected,
                    bool usbMounted,
                    bool showMonitor,
+                   MidiRunMode runMode,
                    const MidiLogEntry* log,
                    uint8_t logHead);
 

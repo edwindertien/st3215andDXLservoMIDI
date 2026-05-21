@@ -678,11 +678,12 @@ void OledUi::drawMidiSetup(const MidiServoBinding* bindings,
                             uint8_t count,
                             int selected,
                             int editStep,
+                            uint8_t jumpFilter,
                             bool usbMounted) {
-  // editStep: 0=navigating, 1=CC, 2=channel, 3=invert, 4=smooth
+  // editStep: 0=navigating, 1=CC, 2=channel, 3=invert, 4=smooth, 5=jumpFilter
 
   const int totalBindings = (int)count + 3; // servo + Spd + Acc + Smt
-  const int TOTAL_ROWS    = totalBindings + 1;
+  const int TOTAL_ROWS    = totalBindings + 2; // +JumpFilter +Run
 
   headerWithRight("MIDI Setup", usbMounted ? "USB" : "noUSB");
 
@@ -713,6 +714,17 @@ void OledUi::drawMidiSetup(const MidiServoBinding* bindings,
     bool isSel = (idx == selected);
 
     if (idx == totalBindings) {
+      // JumpFilter row — global jump threshold, 0=off
+      if (isSel) drawSelectionMarker(y, editStep == 5);
+      _display.setCursor(8, y);
+      _display.print("JmpFlt:");
+      if (isSel && editStep == 5) _display.print("[");
+      if (jumpFilter == 0) _display.print("off");
+      else                 _display.print(jumpFilter);
+      if (isSel && editStep == 5) _display.print("]");
+      continue; // do not fall through into binding rendering below
+
+    } else if (idx == totalBindings + 1) {
       if (isSel) drawSelectionMarker(y, false);
       _display.setCursor(10, y);
       _display.print(">Run<");
@@ -775,6 +787,7 @@ void OledUi::drawMidiSetup(const MidiServoBinding* bindings,
     case 2: footer("Turn=Ch   Shrt=next"); break;
     case 3: footer("Turn=Inv  Shrt=next"); break;
     case 4: footer("Turn=Smt  Shrt=done"); break;
+    case 5: footer("Turn=Jmp  Shrt=done"); break;
     default:footer("Shrt=edit Lng=back");  break;
   }
 
@@ -786,6 +799,7 @@ void OledUi::drawMidiRun(const MidiServoBinding* bindings,
                           int selected,
                           bool usbMounted,
                           bool showMonitor,
+                          MidiRunMode runMode,
                           const MidiLogEntry* log,
                           uint8_t logHead) {
 
@@ -828,9 +842,12 @@ void OledUi::drawMidiRun(const MidiServoBinding* bindings,
   }
 
   // ---- Servo activity list ----
-  // Rows: 0..totalBindings-1 = servos+globals (bindingCount+3), Monitor, Panic
+  // Rows: 0..totalBindings-1 = servos+globals (bindingCount+3)
+  //       totalBindings      = Mode row
+  //       totalBindings+1    = Monitor row
+  //       totalBindings+2    = Panic row
   const int totalBindings = (int)count + 3;  // +Spd +Acc +Smt
-  const int TOTAL_ROWS    = totalBindings + 2; // +Monitor +Panic
+  const int TOTAL_ROWS    = totalBindings + 3; // +Mode +Monitor +Panic
 
   headerWithRight("MIDI Run", usbMounted ? "USB" : "!USB");
 
@@ -847,12 +864,19 @@ void OledUi::drawMidiRun(const MidiServoBinding* bindings,
     bool isSelected = (idx == selected);
 
     if (idx == totalBindings) {
+      // Mode row — cycles Send+Recv / Send only / Recv only
+      if (isSelected) drawSelectionMarker(y, false);
+      _display.setCursor(10, y);
+      _display.print("Mode:");
+      _display.print(midiRunModeName(runMode));
+
+    } else if (idx == totalBindings + 1) {
       // Monitor row
       if (isSelected) drawSelectionMarker(y, false);
       _display.setCursor(10, y);
       _display.print("MIDI Monitor");
 
-    } else if (idx == totalBindings + 1) {
+    } else if (idx == totalBindings + 2) {
       // Panic row
       if (isSelected) {
         _display.fillRect(0, y - 1, 128, 10, _OLED_COLOR_ON);

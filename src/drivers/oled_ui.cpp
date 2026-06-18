@@ -76,7 +76,7 @@ void OledUi::drawSelectionMarker(int rowY, bool editing) {
 }
 
 float OledUi::posToDeg(int pos) {
-  return 360.0f * ((float)pos / 4095.0f);
+  return 360.0f * ((float)pos / 4095.0f); // kept for non-live-control use
 }
 
 void OledUi::printDegreeSymbol() {
@@ -102,15 +102,16 @@ void OledUi::drawPositionBar(int targetPos,
                              int actualPos,
                              int minLimit,
                              int maxLimit,
+                             int posMax,
                              int x,
                              int y,
                              int w,
                              int h) {
   if (minLimit < 0) minLimit = 0;
-  if (maxLimit > 4095) maxLimit = 4095;
+  if (maxLimit > posMax) maxLimit = posMax;
   if (minLimit > maxLimit) {
     minLimit = 0;
-    maxLimit = 4095;
+    maxLimit = posMax;
   }
 
   _display.drawRect(x, y, w, h, _OLED_COLOR_ON);
@@ -119,8 +120,8 @@ void OledUi::drawPositionBar(int targetPos,
   int innerX1 = x + w - 2;
   int innerW  = innerX1 - innerX0 + 1;
 
-  int minX = map(minLimit, 0, 4095, innerX0, innerX1);
-  int maxX = map(maxLimit, 0, 4095, innerX0, innerX1);
+  int minX = map(minLimit, 0, posMax, innerX0, innerX1);
+  int maxX = map(maxLimit, 0, posMax, innerX0, innerX1);
 
   // Hatch unusable left region
   for (int xx = innerX0; xx < minX; ++xx) {
@@ -141,12 +142,12 @@ void OledUi::drawPositionBar(int targetPos,
   _display.drawLine(maxX, y + 1, maxX, y + h - 2, _OLED_COLOR_ON);
 
   // Target marker: thin line
-  int tgtX = map(targetPos, 0, 4095, innerX0, innerX1);
+  int tgtX = map(targetPos, 0, posMax, innerX0, innerX1);
   _display.drawLine(tgtX, y + 1, tgtX, y + h - 2, _OLED_COLOR_ON);
 
   // Actual marker: filled block
   if (actualPos >= 0) {
-    int actX = map(actualPos, 0, 4095, innerX0, innerX1);
+    int actX = map(actualPos, 0, posMax, innerX0, innerX1);
     int boxW = 3;
     int boxX = actX - (boxW / 2);
     if (boxX < innerX0) boxX = innerX0;
@@ -215,6 +216,7 @@ void OledUi::drawLiveControl(uint8_t servoId,
                              bool torqueEnabled,
                              int minLimit,
                              int maxLimit,
+                             int posMax,
                              int speed,
                              int acc,
                              int selected,
@@ -243,7 +245,7 @@ void OledUi::drawLiveControl(uint8_t servoId,
 
   if (actualPos >= 0) {
     char abuf[8];
-    float adeg = 360.0f * ((float)actualPos / 4095.0f);
+    float adeg = 360.0f * ((float)actualPos / (float)posMax);
     snprintf(abuf, sizeof(abuf), "%.1f", adeg);
     // Each char is 6px wide at textSize=1; degree symbol counts as one char
     int strW = ((int)strlen(abuf) + 1) * 6;
@@ -263,7 +265,7 @@ void OledUi::drawLiveControl(uint8_t servoId,
 
   {
     char tbuf[8];
-    float tdeg = 360.0f * ((float)targetPos / 4095.0f);
+    float tdeg = 360.0f * ((float)targetPos / (float)posMax);
     snprintf(tbuf, sizeof(tbuf), "%.1f", tdeg);
     int strW = ((int)strlen(tbuf) + 1) * 6;
     _display.setCursor(127 - strW, yTgt);
@@ -286,7 +288,7 @@ void OledUi::drawLiveControl(uint8_t servoId,
   _display.print(acc);
 
   // --- Position bar ---
-  drawPositionBar(targetPos, actualPos, minLimit, maxLimit, 0, yBar, 128, 9);
+  drawPositionBar(targetPos, actualPos, minLimit, maxLimit, posMax, 0, yBar, 128, 9);
 
   footer(editing ? "Turn=chg Short=OK Long=cancel" : "Short=edit Long=back");
   _display.display();
@@ -394,15 +396,19 @@ void OledUi::drawConfigMenu(uint8_t servoId,
                             int selected,
                             bool editing,
                             const uint32_t* baudTable,
-                            int baudCount) {
+                            int baudCount,
+                            bool scsMode,
+                            bool showTypeRow) {
   char right[20];
   snprintf(right, sizeof(right), "ID %u%s", servoId, dirty ? "*" : "");
   headerWithRight("Configure", right);
 
-  // 7 items: 0=ID, 1=Min, 2=Max, 3=TrqLim, 4=Offset, 5=Mode, 6=Baud
+  // 8 items: 0=ID, 1=Min, 2=Max, 3=TrqLim, 4=Offset, 5=Mode, 6=Baud, 7=Type
   // Show 4 rows at a time, scroll with selection
-  const char* labels[7] = { "NewID", "Min", "Max", "TrqLim", "Offset", "Mode", "Baud" };
+  const char* labels[8] = { "NewID", "Min", "Max", "TrqLim", "Offset", "Mode", "Baud", "Type" };
 
+  // Type row (7) shown only for ST3215/SC09 protocols
+  const int itemCount = showTypeRow ? 8 : 7;
   int start = 0;
   if (selected >= 4) start = selected - 3;
 
@@ -411,10 +417,10 @@ void OledUi::drawConfigMenu(uint8_t servoId,
 
   for (int row = 0; row < 4; ++row) {
     int idx = start + row;
-    if (idx >= 7) break;
+    if (idx >= itemCount) break;
     int y = y0 + row * step;
 
-    if (idx == selected) drawSelectionMarker(y, editing);
+    if (idx == selected) drawSelectionMarker(y, editing && idx != 5 && idx != 7);
     _display.setCursor(10, y);
     _display.print(labels[idx]);
     _display.print(":");
@@ -434,6 +440,11 @@ void OledUi::drawConfigMenu(uint8_t servoId,
         else                     { _display.print(b); }
         break;
       }
+      case 7:
+        // Type row only shown for ST3215-family protocols (scsMode param doubles
+        // as showTypeRow — true=SCS, false=STS; in both cases Type row is relevant)
+        _display.print(scsMode ? "SCS/SC09" : "STS/3215");
+        break;
     }
   }
 
@@ -927,7 +938,7 @@ void OledUi::drawPersistDiag(const PersistDiag& d) {
   header("Flash Diag");
 
   const int y0   = 12;
-  const int step = 10;
+  const int step = 8;  // 5 rows x 8px fits between header(y=10) and footer(y=54)
 
   // Row 0: mounted + filesystem size
   _display.setCursor(0, y0);
@@ -998,8 +1009,8 @@ void OledUi::drawPersistDiag(const PersistDiag& d) {
 void OledUi::drawSelectProtocol(int activeProtocol, int cursor) {
   header("Select Protocol");
 
-  const int y0   = 12;
-  const int step = 12;
+  const int y0   = 11;
+  const int step = 10; // 10px step fits 5 protocols between header(y=10) and footer(y=54)
 
   for (int i = 0; i < BUS_PROTOCOL_COUNT; ++i) {
     int y = y0 + i * step;
@@ -1007,7 +1018,7 @@ void OledUi::drawSelectProtocol(int activeProtocol, int cursor) {
     bool isActive = (i == activeProtocol);
 
     if (isCursor) {
-      _display.fillRect(0, y - 1, 128, 11, _OLED_COLOR_ON);
+      _display.fillRect(0, y - 1, 128, 10, _OLED_COLOR_ON);
       _display.setTextColor(_OLED_COLOR_OFF);
     }
 

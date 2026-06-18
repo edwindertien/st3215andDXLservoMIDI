@@ -1,7 +1,9 @@
 #include "dxl2_bus.h"
 #include "../config.h"
 
-Dxl2Bus dxl2Bus;
+// Global instance — passes SERVO_DE_PIN so wired direction-control boards
+// assert DE/RE automatically in txBegin()/txEnd(). -1 = auto-direction adapter.
+Dxl2Bus dxl2Bus(HW::SERVO_DE_PIN);
 
 // ---------------------------------------------------------------------------
 // TX/RX blink — Green=TX, Red=RX (same as DXL1)

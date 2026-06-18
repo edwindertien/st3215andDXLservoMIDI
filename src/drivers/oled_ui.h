@@ -48,6 +48,7 @@ public:
                        bool torqueEnabled,
                        int minLimit,
                        int maxLimit,
+                       int posMax,
                        int speed,
                        int acc,
                        int selected,
@@ -75,7 +76,9 @@ public:
                       int selected,
                       bool editing,
                       const uint32_t* baudTable,
-                      int baudCount);
+                      int baudCount,
+                      bool scsMode,
+                      bool showTypeRow);
 
   void drawConfirmSave(uint8_t servoId,
                        uint8_t stagedId,
@@ -153,6 +156,7 @@ private:
                        int actualPos,
                        int minLimit,
                        int maxLimit,
+                       int posMax,
                        int x,
                        int y,
                        int w,

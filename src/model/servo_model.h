@@ -40,12 +40,14 @@ enum class BusProtocol : uint8_t {
   ST3215 = 0,
   DXL1   = 1,   // Dynamixel Protocol 1.0 (MX series RS-485)
   DXL2   = 2,   // Dynamixel Protocol 2.0 (XM/XH/XD series RS-485)
+  SC09   = 3,   // Feetech SCS protocol (SC09, SC15, SC16 — 10-bit, lock reg 48)
 };
-static constexpr int BUS_PROTOCOL_COUNT = 3;
+static constexpr int BUS_PROTOCOL_COUNT = 4;
 static constexpr const char* BUS_PROTOCOL_NAMES[BUS_PROTOCOL_COUNT] = {
   "ST3215 / STS",
   "DXL MX (P1.0)",
-  "DXL X  (P2.0)"
+  "DXL X  (P2.0)",
+  "SC09   / SCS"
 };
 
 enum class MenuItemType : uint8_t { Action, Toggle, Integer, Choice, Back };

@@ -18,24 +18,43 @@
 // ---------------------------------------------------------------------------
 class EchoSMS_STS : public SMS_STS {
 public:
-  uint32_t _baud = 1000000UL; // kept in sync with Serial1 baud by ST3215Bus
+  uint32_t _baud  = 1000000UL; // kept in sync with Serial1 baud by ST3215Bus
+  int8_t   _dePin = -1;        // RS485 direction pin; -1 = auto-direction (echo drain)
 
 protected:
+  // Called by SCServo library before every TX packet.
+  // Assert DE HIGH so the RS485 driver enables its transmitter.
+  // With auto-direction adapter (_dePin=-1) this is a no-op.
+  int writeSCS(unsigned char* nDat, int nLen) override {
+    if (_dePin >= 0) digitalWrite(_dePin, HIGH);
+    return SMS_STS::writeSCS(nDat, nLen);
+  }
+  int writeSCS(unsigned char bDat) override {
+    if (_dePin >= 0) digitalWrite(_dePin, HIGH);
+    return SMS_STS::writeSCS(bDat);
+  }
+
+  // Called by SCServo library immediately after every TX packet.
+  // With a wired DE pin: flush(), release DE, then return (no echo to drain).
+  // With auto-direction adapter: flush(), wait for echo to arrive, drain it.
   void wFlushSCS() override {
     if (!pSerial) return;
-    // Wait for UART TX to physically complete. write() is non-blocking;
-    // flush() blocks until the shift register sends its last bit.
-    // By the time flush() returns, ALL echo bytes have arrived in the
-    // RX FIFO (echo propagation = ~1µs, well within flush() settling).
-    pSerial->flush();
-    // Wait 2 byte-times as a margin, then drain the echo.
-    // Do NOT use drain-until-empty — that would consume the servo response
-    // which arrives ~50µs after the echo ends.
-    // 2 byte-times at _baud is always enough margin and always ends before
-    // the servo starts responding.
-    uint32_t waitUs = (2UL * 10UL * 1000000UL) / _baud;
-    delayMicroseconds(waitUs);
-    while (pSerial->read() != -1) {} // discard echo bytes
+    pSerial->flush(); // wait for TX shift register to empty
+
+    if (_dePin >= 0) {
+      // Wired direction control: add a short guard then release DE.
+      // No echo to drain — the RS485 driver blocked RX during TX.
+      uint32_t guardUs = (2UL * 10UL * 1000000UL) / _baud;
+      delayMicroseconds(guardUs);
+      digitalWrite(_dePin, LOW);
+    } else {
+      // Auto-direction adapter: echo arrives on RX; drain it.
+      // Bounded drain — do NOT use drain-until-empty which would
+      // consume the servo response arriving ~50µs after the echo.
+      uint32_t waitUs = (2UL * 10UL * 1000000UL) / _baud;
+      delayMicroseconds(waitUs);
+      while (pSerial->read() != -1) {}
+    }
   }
 };
 
@@ -72,14 +91,22 @@ public:
   bool saveMode(uint8_t id, int mode) override;
   bool saveBaud(uint8_t id, int baudIndex) override;
 
-  const char* protocolName() const override { return "ST3215 / STS"; }
+  const char* protocolName() const override {
+    return _scsMode ? "SC09 / SCS" : "ST3215 / STS";
+  }
   int posMin() const override { return 0; }
-  int posMax() const override { return 4095; }
+  int posMax() const override { return _scsMode ? 1023 : 4095; }
+
+  // Switch between STS (ST3215, default) and SCS (SC09) sub-protocol.
+  // Affects EEPROM lock register address and position range only.
+  void setScsMode(bool scs); // implementation in servo_bus.cpp — also sets _servo.End
+  bool getScsMode() const   { return _scsMode; }
 
 private:
-  EchoSMS_STS      _servo;  // echo-aware subclass of SMS_STS
-  HardwareSerial*  _serial = nullptr;
-  uint32_t         _baud   = 1000000UL;
+  EchoSMS_STS      _servo;
+  HardwareSerial*  _serial  = nullptr;
+  uint32_t         _baud    = 1000000UL;
+  bool             _scsMode = false;  // false=STS (ST3215), true=SCS (SC09)
 };
 
 // ---------------------------------------------------------------------------

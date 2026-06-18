@@ -48,7 +48,12 @@ IServoBus* busForProtocol(BusProtocol p) {
   switch (p) {
     case BusProtocol::DXL1: return &dxl1Bus;
     case BusProtocol::DXL2: return &dxl2Bus;
-    default:                return &st3215Bus;
+    case BusProtocol::SC09:
+      st3215Bus.setScsMode(true);   // lock reg 48, posMax 1023
+      return &st3215Bus;
+    default:
+      st3215Bus.setScsMode(false);  // lock reg 55, posMax 4095
+      return &st3215Bus;
   }
 }
 
@@ -240,15 +245,30 @@ void setup() {
   { unsigned long t = millis();
     while (!midiEngine.isMounted() && millis() - t < 1500) delay(10); }
 
-  // CDC serial — available after TinyUSB enumerates.
-  // Opens immediately on the PC side; we don't wait to avoid blocking boot.
+  // CDC serial — open early so boot messages appear even if I2C hangs later.
   Serial.begin(115200);
 
-  // I2C
+  // I2C bus recovery — clock SCL 9 times before Wire.begin() to free any
+  // slave device that is holding SDA low from a previous failed transaction.
+  // Without this, Wire.begin() on RP2040 can hang indefinitely if the OLED
+  // or encoder was mid-transaction when the MCU was reset.
+  pinMode(HW::OLED_SDA_PIN, INPUT_PULLUP);
+  pinMode(HW::OLED_SCL_PIN, OUTPUT);
+  for (int i = 0; i < 9; ++i) {
+    digitalWrite(HW::OLED_SCL_PIN, HIGH); delayMicroseconds(5);
+    digitalWrite(HW::OLED_SCL_PIN, LOW);  delayMicroseconds(5);
+  }
+  // STOP condition: SDA low → SDA high while SCL high
+  pinMode(HW::OLED_SDA_PIN, OUTPUT);
+  digitalWrite(HW::OLED_SDA_PIN, LOW);
+  digitalWrite(HW::OLED_SCL_PIN, HIGH); delayMicroseconds(5);
+  digitalWrite(HW::OLED_SDA_PIN, HIGH); delayMicroseconds(5);
+
   Wire.setSDA(HW::OLED_SDA_PIN);
   Wire.setSCL(HW::OLED_SCL_PIN);
   Wire.begin();
   Wire.setClock(HW::ENC_I2C_HZ);
+  Serial.println(F("[BOOT] Wire init OK"));
 
 #if defined(BOARD_PICO_GROVE)
   Wire1.setSDA(HW::ENC_SDA_PIN);
@@ -262,6 +282,8 @@ void setup() {
   if (appState.oledOk) ui.splash("Servo Tester",
 #if defined(BOARD_PICO_GROVE)
     "Pico+Grove"
+#elif defined(BOARD_CUSTOM_RS485)
+    "Pico+RS485"
 #else
     "XIAO+RS485"
 #endif
@@ -299,6 +321,13 @@ void setup() {
   Serial.println(F("  e = DXL1 raw bytes ping ID1 @ 57142 (loopback test)"));
   Serial.println(F("  a = DXL2 ping ID1 on ALL baud rates"));
   Serial.println(F("  w = DXL2 Wizard-exact ping @ 1Mbaud (hardcoded CRC 19 4E)"));
+  Serial.println(F("  x = DE-pin loopback: toggle GP2 DE, send 0xAA, check RX echo"));
+  Serial.println(F("  i = I2C scan on Wire (GP4/GP5) — find actual OLED address"));
+  Serial.print(F("[BOOT] oledOk="));    Serial.print(appState.oledOk    ? "YES" : "NO");
+  Serial.print(F("  encoderOk="));      Serial.println(appState.encoderOk ? "YES" : "NO");
+  if (HW::SERVO_DE_PIN >= 0) {
+    Serial.print(F("[BOOT] SERVO_DE_PIN=")); Serial.println((int)HW::SERVO_DE_PIN);
+  }
 
   StatusLed::green();
   Buzzer::beep(1800, 50);
@@ -346,16 +375,25 @@ void loop() {
       }
     }
     else if (cmd == 'e' || cmd == 'E') {
-      // Raw byte loopback — bypasses dxl1Bus, confirms adapter RX path.
-      // Buffer ALL received bytes before any Serial.print — printing inside
-      // the receive loop would block the CDC TX buffer and delay reads.
+      // Raw byte loopback — bypasses dxl1Bus, confirms RS485 TX and RX path.
+      // Manually asserts DE pin if wired (SERVO_DE_PIN >= 0).
       Serial1.end();
       Serial1.begin(57142);
-      while (Serial1.available()) Serial1.read(); // drain stale bytes
+      while (Serial1.available()) Serial1.read();
+
+      constexpr int8_t dePin = HW::SERVO_DE_PIN;
+      if (dePin >= 0) { pinMode(dePin, OUTPUT); digitalWrite(dePin, HIGH); }
 
       uint8_t dxl1ping[] = {0xFF,0xFF,0x01,0x02,0x01,0xFB};
       for (uint8_t b : dxl1ping) Serial1.write(b);
       Serial1.flush();
+
+      if (dePin >= 0) {
+        // baud-derived guard before releasing DE
+        uint32_t guardUs = (3UL * 10UL * 1000000UL) / 57142UL + 200UL;
+        delayMicroseconds(guardUs);
+        digitalWrite(dePin, LOW);
+      }
 
       // Buffer capture with microsecond timestamps
       static const int EBUF = 32;
@@ -405,9 +443,18 @@ void loop() {
       while (Serial1.available()) Serial1.read(); // drain
 
       const uint8_t wizPing[] = {0xFF,0xFF,0xFD,0x00,0x01,0x03,0x00,0x01,0x19,0x4E};
-      for (uint8_t b : wizPing) Serial1.write(b);
-      Serial1.flush();
-      delayMicroseconds(500);
+      {
+        constexpr int8_t dePin = HW::SERVO_DE_PIN;
+        if (dePin >= 0) { pinMode(dePin, OUTPUT); digitalWrite(dePin, HIGH); }
+        for (uint8_t b : wizPing) Serial1.write(b);
+        Serial1.flush();
+        if (dePin >= 0) {
+          uint32_t guardUs = (3UL * 10UL * 1000000UL) / 1000000UL + 200UL;
+          delayMicroseconds(guardUs);
+          digitalWrite(dePin, LOW);
+        }
+        delayMicroseconds(500);
+      }
 
       // Buffer capture — all Serial.print AFTER
       static const int WBUF = 64;
@@ -430,6 +477,80 @@ void loop() {
       Serial.println();
       Serial.print(F("Total: ")); Serial.print(wn); Serial.println(F(" bytes"));
       Serial.println(F("Expected: 14 bytes starting FF FF FD 00 01 07 00 55 ..."));
+    }
+    else if (cmd == 'x' || cmd == 'X') {
+      // DE-pin loopback diagnostic for wired RS485 boards.
+      // Step 1: confirm DE pin value can be read back (GPIO sanity)
+      // Step 2: send one byte WITH DE asserted, check RX path
+      // Step 3: send one byte WITHOUT DE, check nothing arrives (loopback absent)
+      Serial.println(F("\n--- DE-pin / RS485 loopback diagnostic ---"));
+      constexpr int8_t dePin = HW::SERVO_DE_PIN;
+      if (dePin < 0) {
+        Serial.println(F("SERVO_DE_PIN = -1 (auto-direction build) — DE test not applicable"));
+      } else {
+      Serial.print(F("SERVO_DE_PIN = ")); Serial.println((int)dePin);
+
+      // Configure
+      pinMode(dePin, OUTPUT);
+      Serial1.end();
+      Serial1.begin(57600);
+      while (Serial1.available()) Serial1.read();
+
+      // --- Test A: DE HIGH (TX mode) — send 0xAA, expect echo on RX ---
+      digitalWrite(dePin, HIGH);
+      delayMicroseconds(50);
+      Serial1.write((uint8_t)0xAA);
+      Serial1.flush();
+      delayMicroseconds(500);
+      digitalWrite(dePin, LOW);
+
+      // Buffer capture
+      uint8_t rxA[8]; uint32_t tA[8]; int nA = 0;
+      unsigned long t0A = micros();
+      while (micros() - t0A < 3000 && nA < 8) {
+        if (Serial1.available()) { rxA[nA] = Serial1.read(); tA[nA] = micros()-t0A; ++nA; }
+      }
+      Serial.print(F("A) DE=HIGH, TX 0xAA: RX bytes: "));
+      if (!nA) { Serial.println(F("(none) <- DE not enabling TX, or RX wiring broken")); }
+      else { for(int i=0;i<nA;i++){Serial.print(rxA[i],HEX);Serial.print(' ');} Serial.println(); }
+
+      // --- Test B: DE LOW (RX mode) — send 0x55, expect nothing ---
+      while (Serial1.available()) Serial1.read();
+      digitalWrite(dePin, LOW);
+      Serial1.write((uint8_t)0x55);
+      Serial1.flush();
+      delayMicroseconds(500);
+
+      uint8_t rxB[8]; int nB = 0;
+      unsigned long t0B = micros();
+      while (micros() - t0B < 3000 && nB < 8) {
+        if (Serial1.available()) { rxB[nB++] = Serial1.read(); }
+      }
+      Serial.print(F("B) DE=LOW,  TX 0x55: RX bytes: "));
+      if (!nB) { Serial.println(F("(none) <- correct: DE low blocks TX")); }
+      else { for(int i=0;i<nB;i++){Serial.print(rxB[i],HEX);Serial.print(' ');} Serial.println(F("<- unexpected echo?")); }
+
+      Serial.println(F("Expected: A=AA (echo), B=none. If A=none: check GP2->DE wiring or DE polarity."));
+        dxl1Bus.setBaud(57142); // restore
+      } // end dePin >= 0
+    }
+    else if (cmd == 'i' || cmd == 'I') {
+      // I2C bus scan — shows every address that acknowledges on Wire (GP4/GP5)
+      // Use this to find the actual OLED address when oledOk=NO
+      Serial.println(F("\n--- I2C scan on Wire ---"));
+      int found = 0;
+      for (uint8_t addr = 1; addr < 127; ++addr) {
+        Wire.beginTransmission(addr);
+        if (Wire.endTransmission() == 0) {
+          Serial.print(F("  0x"));
+          if (addr < 0x10) Serial.print('0');
+          Serial.println(addr, HEX);
+          ++found;
+        }
+      }
+      if (!found) Serial.println(F("  (nothing found)"));
+      Serial.print(F("Total: ")); Serial.print(found); Serial.println(F(" device(s)"));
+      Serial.println(F("Expected: 0x3C=OLED, 0x40=encoder"));
     }
   }
 

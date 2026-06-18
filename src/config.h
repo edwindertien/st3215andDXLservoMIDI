@@ -11,8 +11,8 @@
 // Do NOT define them here — use the [env:xxx] sections in platformio.ini.
 // That way switching target is just a one-click environment change in VS Code.
 // =============================================================================
-#if !defined(BOARD_PICO_GROVE) && !defined(BOARD_XIAO_EXPANSION)
-  #error "No board selected. Set BOARD_PICO_GROVE or BOARD_XIAO_EXPANSION in platformio.ini build_flags."
+#if !defined(BOARD_PICO_GROVE) && !defined(BOARD_XIAO_EXPANSION) && !defined(BOARD_CUSTOM_RS485)
+  #error "No board selected. Set BOARD_PICO_GROVE, BOARD_XIAO_EXPANSION, or BOARD_CUSTOM_RS485 in platformio.ini build_flags."
 #endif
 
 #if defined(BOARD_PICO_GROVE)
@@ -24,6 +24,7 @@
 namespace HW {
   static constexpr uint8_t  SERVO_TX_PIN   = 0;
   static constexpr uint8_t  SERVO_RX_PIN   = 1;
+  static constexpr int8_t   SERVO_DE_PIN   = -1;      // auto-direction adapter, no DE pin
   static constexpr uint32_t SERVO_BAUD     = 1000000UL;
 
   static constexpr uint8_t  OLED_SDA_PIN   = 4;
@@ -68,6 +69,7 @@ namespace HW {
 namespace HW {
   static constexpr uint8_t  SERVO_TX_PIN   = 0;       // GP0  = D6
   static constexpr uint8_t  SERVO_RX_PIN   = 1;       // GP1  = D7
+  static constexpr int8_t   SERVO_DE_PIN   = -1;      // auto-direction adapter, no DE pin
   static constexpr uint32_t SERVO_BAUD     = 1000000UL;
 
   // OLED and Encoder share the single exposed I2C bus (Wire = GP6/GP7)
@@ -101,9 +103,44 @@ namespace HW {
   static constexpr bool     LED_ACTIVE_LOW  = true;
 }
 
-#else
-  #error "No board configuration selected — uncomment one BOARD_xxx define in config.h"
-#endif
+#elif defined(BOARD_CUSTOM_RS485)
+// ---- Custom board — Pico RP2040, wired RS485 with direction pin ----
+// Servo bus: UART0  on GP0 (TX) / GP1 (RX)
+// RS485 DE:  GP2                         ← direction control (HIGH=TX, LOW=RX)
+// OLED:      I2C0   on GP4 (SDA) / GP5 (SCL)  (Wire, shared with encoder)
+// Encoder:   same I2C bus as OLED        (Wire, GP4/GP5)
+// Display:   SH1107 64×128 (same as Pico Grove build)
+namespace HW {
+  static constexpr uint8_t  SERVO_TX_PIN   = 0;
+  static constexpr uint8_t  SERVO_RX_PIN   = 1;
+  static constexpr uint8_t  SERVO_DE_PIN   = 2;       // RS485 DE/RE direction pin
+  static constexpr uint32_t SERVO_BAUD     = 1000000UL;
+
+  static constexpr uint8_t  OLED_SDA_PIN   = 4;
+  static constexpr uint8_t  OLED_SCL_PIN   = 5;
+  static constexpr uint8_t  OLED_ADDR      = 0x3C;
+  static constexpr uint16_t OLED_W         = 64;
+  static constexpr uint16_t OLED_H         = 128;
+  static constexpr int      OLED_ROTATION  = 1;       // SH1107: 1=portrait
+
+  // Encoder shares the single I2C bus with the OLED
+  static constexpr uint8_t  ENC_SDA_PIN    = 4;       // same as OLED
+  static constexpr uint8_t  ENC_SCL_PIN    = 5;
+  static constexpr uint8_t  ENC_ADDR       = 0x40;
+  static constexpr uint8_t  ENC_8_ADDR     = 0x41;
+  static constexpr uint32_t ENC_I2C_HZ     = 100000UL;
+
+  static constexpr uint8_t  USB_HOST_DP_PIN = 16;
+  static constexpr uint8_t  USB_HOST_DM_PIN = 17;
+
+  static constexpr int8_t   BUZZER_PIN      = -1;
+  static constexpr int8_t   LED_R_PIN       = -1;
+  static constexpr int8_t   LED_G_PIN       = -1;
+  static constexpr int8_t   LED_B_PIN       = -1;
+  static constexpr bool     LED_ACTIVE_LOW  = false;
+}
+
+#endif // board selection
 
 // =============================================================================
 // STATUS LED HELPERS

@@ -4,7 +4,7 @@
 #include "../config.h"
 
 static constexpr uint32_t PERSIST_MAGIC   = 0x53543332;
-static constexpr uint8_t  PERSIST_VERSION = 10; // bumped: added midiJumpFilter
+static constexpr uint8_t  PERSIST_VERSION = 11; // bumped: added scsMode
 static constexpr char     PERSIST_PATH[]  = "/config.bin";
 
 struct PersistedMidiBinding {
@@ -38,6 +38,7 @@ struct PersistentConfig {
   uint8_t  smoothChannel = 1;
   uint8_t  midiRunMode   = 0;  // MidiRunMode enum value — 0=SendRecv (default)
   uint8_t  midiJumpFilter = 0; // max CC delta accepted; 0=off
+  uint8_t  scsMode        = 0; // 0=STS (ST3215), 1=SCS (SC09)
 };
 
 struct PersistDiag {

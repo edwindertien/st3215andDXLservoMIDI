@@ -1,5 +1,6 @@
 #include "app.h"
 #include "../drivers/persist.h"
+#include "../drivers/servo_bus.h"
 #include "../drivers/dxl1_bus.h"
 #include "../drivers/dxl2_bus.h"
 #include <stdio.h>
@@ -24,7 +25,7 @@ const char* HOME_ITEMS[] = {
 constexpr int HOME_COUNT = sizeof(HOME_ITEMS) / sizeof(HOME_ITEMS[0]);
 
 constexpr int SCAN_BAUD_ITEM_COUNT = BAUD_TABLE_COUNT + 1;
-constexpr int CONFIG_ITEM_COUNT    = 7;
+constexpr int CONFIG_ITEM_COUNT    = 8;  // +1 for Type (STS/SCS) row; hidden for non-ST3215 protocols
 
 // Flash duration in render() cycles for MIDI activity indicators
 constexpr uint8_t MIDI_FLASH_FRAMES = 8;
@@ -165,6 +166,8 @@ void App::loadPersistedState() {
     }
     _app.midi.runMode    = (MidiRunMode)cfg.midiRunMode;
     _app.midi.jumpFilter = cfg.midiJumpFilter;
+    // scsMode is derived from protocol — SC09 always uses SCS mode
+    st3215Bus.setScsMode(_app.protocol == BusProtocol::SC09 || cfg.scsMode != 0);
   } else {
     // No valid saved state — scan the bus as before
     if (_app.oledOk) _ui.splash("Scanning bus...");
@@ -210,6 +213,7 @@ void App::savePersistedState() {
   }
   cfg.midiRunMode    = (uint8_t)_app.midi.runMode;
   cfg.midiJumpFilter = _app.midi.jumpFilter;
+  cfg.scsMode        = st3215Bus.getScsMode() ? 1 : 0;
 
   persist.save(cfg);
 }
@@ -240,6 +244,7 @@ const uint32_t* App::activeBaudTable(int& count) const {
       count = DXL2_BAUD_CNT;
       return DXL2_BAUDS;
     case BusProtocol::ST3215:
+    case BusProtocol::SC09:
     default:
       count = BAUD_TABLE_COUNT;
       return BAUD_TABLE;
@@ -444,7 +449,7 @@ void App::loadStagedConfigFromActive() {
   _app.cfg.dirty        = false;
   _app.cfg.servoId      = loadedId;
   _app.cfg.minLimit     = ok ? loadedMin  : 0;
-  _app.cfg.maxLimit     = ok ? loadedMax  : 4095;
+  _app.cfg.maxLimit     = ok ? loadedMax  : _bus->posMax();
   _app.cfg.torqueLimit  = ok ? loadedTorq : 1000;
   _app.cfg.centerOffset = ok ? loadedOfs  : 0;
   _app.cfg.mode         = ok ? loadedMode : 0;
@@ -1076,7 +1081,7 @@ void App::handleLiveControlInput(int delta, bool shortPress, bool longPress) {
     case 1:
       if (delta != 0) {
         _app.targetPos = clampInt(_app.targetPos + delta * UI::POSITION_STEP,
-                                  ST3215::POS_MIN, ST3215::POS_MAX);
+                                  _bus->posMin(), _bus->posMax());
         if (_app.torqueEnabled)
           _bus->setPosition(id, _app.targetPos, _app.speed, _app.acc);
       }
@@ -1123,6 +1128,7 @@ void App::handleConfigInput(int delta, bool shortPress, bool longPress) {
         case 4: _app.cfg.centerOffset = editBackup; break;
         case 5: _app.cfg.mode         = editBackup; break;
         case 6: _app.cfg.baudIndex    = editBackup; break;
+        case 7: break; // Type toggle — no backup needed, it's already reverted by toggle
       }
       _app.editing = false;
     } else {
@@ -1131,8 +1137,13 @@ void App::handleConfigInput(int delta, bool shortPress, bool longPress) {
     return;
   }
   if (!_app.editing) {
-    if (delta != 0)
-      _app.menuIndex = clampInt(_app.menuIndex + delta, 0, CONFIG_ITEM_COUNT - 1);
+    if (delta != 0) {
+      // Type row (index 7) only visible for ST3215-family protocols
+      int maxItem = (_app.protocol == BusProtocol::ST3215 ||
+                     _app.protocol == BusProtocol::SC09)
+                    ? CONFIG_ITEM_COUNT - 1 : CONFIG_ITEM_COUNT - 2;
+      _app.menuIndex = clampInt(_app.menuIndex + delta, 0, maxItem);
+    }
     if (shortPress && hasActiveServo()) {
       switch (_app.menuIndex) {
         case 0: editBackup = _app.cfg.servoId;      _app.editing = true; break;
@@ -1140,7 +1151,6 @@ void App::handleConfigInput(int delta, bool shortPress, bool longPress) {
         case 2: editBackup = _app.cfg.maxLimit;     _app.editing = true; break;
         case 3: editBackup = _app.cfg.torqueLimit;  _app.editing = true; break;
         case 4: editBackup = _app.cfg.centerOffset; _app.editing = true; break;
-        case 5:
           editBackup = _app.cfg.mode;
           if (_app.cfg.mode == 0) {
             _app.pendingMode = 1;
@@ -1151,6 +1161,12 @@ void App::handleConfigInput(int delta, bool shortPress, bool longPress) {
           }
           break;
         case 6: editBackup = _app.cfg.baudIndex; _app.editing = true; break;
+        case 7:
+          // Type row: immediate toggle STS↔SCS, only applies to ST3215 protocol
+          if (_app.protocol == BusProtocol::ST3215)
+            st3215Bus.setScsMode(!st3215Bus.getScsMode());
+          markDirty();
+          break;
       }
     }
     return;
@@ -1159,9 +1175,9 @@ void App::handleConfigInput(int delta, bool shortPress, bool longPress) {
   switch (_app.menuIndex) {
     case 0: { int v = clampInt((int)_app.cfg.servoId + delta, 0, 253);
               if (v != _app.cfg.servoId) { _app.cfg.servoId = (uint8_t)v; changed = true; } break; }
-    case 1: { int v = clampInt(_app.cfg.minLimit + delta * 8, 0, 4095);
+    case 1: { int v = clampInt(_app.cfg.minLimit + delta * 8, 0, _bus->posMax());
               if (v != _app.cfg.minLimit) { _app.cfg.minLimit = v; changed = true; } break; }
-    case 2: { int v = clampInt(_app.cfg.maxLimit + delta * 8, 0, 4095);
+    case 2: { int v = clampInt(_app.cfg.maxLimit + delta * 8, 0, _bus->posMax());
               if (v != _app.cfg.maxLimit) { _app.cfg.maxLimit = v; changed = true; } break; }
     case 3: { int v = clampInt(_app.cfg.torqueLimit + delta * 10, 0, 1000);
               if (v != _app.cfg.torqueLimit) { _app.cfg.torqueLimit = v; changed = true; } break; }
@@ -1171,6 +1187,7 @@ void App::handleConfigInput(int delta, bool shortPress, bool longPress) {
     case 6: { int bc; activeBaudTable(bc);
               int v = clampInt(_app.cfg.baudIndex + delta, 0, bc - 1);
               if (v != _app.cfg.baudIndex) { _app.cfg.baudIndex = v; changed = true; } break; }
+    case 7: break; // Type toggle — handled via short press, no delta edit
   }
   if (changed) _app.cfg.dirty = true;
   if (shortPress) _app.editing = false;
@@ -1400,6 +1417,7 @@ void App::handleSelectProtocolInput(int delta, bool shortPress, bool longPress) 
       _app.scanBaudIndex = 0;
       if (chosen == BusProtocol::DXL1) _app.scanBaudIndex = DXL1_DEFAULT_BAUD_IDX;
       if (chosen == BusProtocol::DXL2) _app.scanBaudIndex = DXL2_DEFAULT_BAUD_IDX;
+      // SC09 uses same baud table and default as ST3215 (index 0 = 1Mbaud)
       _bus->setBaud(tbl[_app.scanBaudIndex]);
       if (_app.oledOk)
         _ui.splash("Protocol", _bus->protocolName(), "Scan needed");
@@ -1436,7 +1454,7 @@ void App::render() {
 
   switch (_app.screen) {
     case ScreenId::Home:
-      _ui.drawMenu("ST3215 Tool", HOME_ITEMS, HOME_COUNT, _app.menuIndex, false,
+      _ui.drawMenu("Bus Servo Ctrl", HOME_ITEMS, HOME_COUNT, _app.menuIndex, false,
                    hasActiveServo() ? "Short=enter" : "No servo");
       break;
     case ScreenId::Scan:
@@ -1462,6 +1480,7 @@ void App::render() {
                           _app.targetPos, _app.actualPos,
                           _app.torqueEnabled,
                           _app.cfg.minLimit, _app.cfg.maxLimit,
+                          _bus->posMax(),
                           _app.speed, _app.acc,
                           _app.menuIndex, _app.editing);
       break;
@@ -1480,7 +1499,9 @@ void App::render() {
                          _app.cfg.torqueLimit, _app.cfg.centerOffset,
                          _app.cfg.mode, _app.cfg.baudIndex,
                          _app.cfg.dirty, _app.menuIndex, _app.editing,
-                         bt, bc);
+                         bt, bc,
+                         st3215Bus.getScsMode(),
+                         _app.protocol == BusProtocol::ST3215 || _app.protocol == BusProtocol::SC09);
     } break;
     case ScreenId::ConfirmSave:
     { int bc; const uint32_t* bt = activeBaudTable(bc);

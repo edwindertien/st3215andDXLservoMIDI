@@ -96,7 +96,7 @@ Three hardware configurations are supported, selected at compile time via the Pl
 |---|---|---|---|---|---|
 | `env:pico` | Raspberry Pi Pico + Grove Shield | SH1107, 64×128 | I2C1 (GP6/GP7) | Two independent buses | Auto-direction adapter, no DE pin |
 | `env:xiao_rp2040` | Seeed XIAO RP2040 + Expansion Board | SSD1306, 128×64 | I2C0 (shared with OLED) | Single shared bus | Auto-direction adapter, no DE pin |
-| `env:pico_rs485` | Custom Pico-based board | SH1107, 64×128 | I2C0 (shared with OLED, GP4/GP5) | Single shared bus | **Wired RS485 with DE/RE on GP2** |
+| `env:pico_rs485` | [picoST3215led boardV2.0](https://github.com/edwindertien/animatronics/tree/main/picoST3215led/boardV2.0) (TTL) or [picoServo boardV1.0](https://github.com/edwindertien/animatronics/tree/main/picoServo/boardV1.0) (RS485) | SH1107, 64×128 | I2C0 (shared with OLED, GP4/GP5) | Single shared bus | **TTL (boardV2.0) or wired RS485 with DE/RE on GP2 (boardV1.0)** |
 
 All three also support **RC PWM mode** on 6 dedicated GPIO pins (see table below) — these pins are completely separate from the I2C, UART, and USB host pins on each board, chosen specifically to avoid conflicts.
 
@@ -120,9 +120,25 @@ All three also support **RC PWM mode** on 6 dedicated GPIO pins (see table below
 
 ![grove shield by SEEED](images/pi-pico-w-pinout-3579354621.jpg)
 
-### Custom RS485 board (env:pico_rs485)
+### Custom boards (env:pico_rs485)
 
-A Pico-based board with a **wired RS485 transceiver** (DE/RE direction control on GP2, no auto-direction adapter), a single shared I2C bus on GP4/GP5 for both OLED and encoder, and 6 free GPIO broken out for RC PWM servo headers. Use a passive Grove hub freely on this board's I2C bus — passive 4-in-1 hubs are just parallel wiring and behave identically to a direct connection. Long I2C wire runs benefit from external pull-up resistors (the onboard pull-ups can be marginal at 400 kHz over longer cable lengths).
+Two community-designed boards have been tested with this firmware under the `env:pico_rs485` environment (same firmware binary — the difference is purely the servo-bus driver chip on the PCB):
+
+**[picoST3215led boardV2.0](https://github.com/edwindertien/animatronics/tree/main/picoST3215led/boardV2.0)** — TTL output driver (no DE/RE direction pin; `SERVO_DE_PIN = -1` behaviour). Confirmed working with:
+- ST3215 (native TTL)
+- SC09 (native TTL)
+- DXL1 / DXL2 (native TTL)
+- DXL1 / DXL2 over **RS485**, via a [Robotis bi-directional TTL↔RS485 converter](https://emanual.robotis.com/docs/en/parts/interface/dxl_bridge/) bridging the board's TTL output to an RS485 Dynamixel bus
+
+**[picoServo boardV1.0](https://github.com/edwindertien/animatronics/tree/main/picoServo/boardV1.0)** — native RS485 transceiver with wired DE/RE direction control on GP2 (`SERVO_DE_PIN = 2`). Confirmed working with:
+- RS485 Dynamixel servos directly (no bridge needed)
+- ST3215 / SC09 / DXL1 / DXL2 in their native **TTL** form, via the same [Robotis bi-directional TTL↔RS485 converter](https://emanual.robotis.com/docs/en/parts/interface/dxl_bridge/) bridging the board's RS485 output down to TTL
+
+> **Firmware note:** both boards currently build under the single `env:pico_rs485` environment, which sets `SERVO_DE_PIN = 2` in `config.h`. On **picoServo boardV1.0** (RS485) this pin genuinely drives the transceiver's DE/RE line. On **picoST3215led boardV2.0** (TTL) GP2 is simply unused by the servo hardware — the firmware still toggles it, but since nothing is wired to it on that board, this is harmless. If GP2 happens to be used for something else on a future TTL board revision, split this into a separate `env:pico_ttl` with `SERVO_DE_PIN = -1`.
+
+Both boards share a single I2C bus on GP4/GP5 for OLED and encoder, and break out 6 free GPIO for RC PWM servo headers. Use a passive Grove hub freely on this I2C bus — passive 4-in-1 hubs are just parallel wiring and behave identically to a direct connection. Long I2C wire runs benefit from external pull-up resistors (the onboard pull-ups can be marginal at 400 kHz over longer cable lengths).
+
+> **Choosing a converter direction:** the Robotis bridge is bidirectional, so either board can reach the "other" electrical standard — TTL boardV2.0 can still drive an RS485 bus, and RS485 boardV1.0 can still drive TTL-only servos (ST3215/SC09/TTL-DXL). Pick whichever board matches your *primary* servo population and bridge the exception.
 
 ---
 
@@ -732,6 +748,9 @@ servo-tester/
 | M5Stack Unit OLED | https://docs.m5stack.com/en/unit/oled |
 | M5Stack Unit Encoder | https://docs.m5stack.com/en/unit/encoder |
 | Dynamixel Protocol 1.0 e-manual | https://emanual.robotis.com/docs/en/dxl/protocol1/ |
+| Robotis bi-directional TTL↔RS485 bridge | https://emanual.robotis.com/docs/en/parts/interface/dxl_bridge/ |
+| picoST3215led boardV2.0 (TTL) | https://github.com/edwindertien/animatronics/tree/main/picoST3215led/boardV2.0 |
+| picoServo boardV1.0 (RS485) | https://github.com/edwindertien/animatronics/tree/main/picoServo/boardV1.0 |
 | Dynamixel Protocol 2.0 e-manual | https://emanual.robotis.com/docs/en/dxl/protocol2/ |
 | MX-28 control table | https://emanual.robotis.com/docs/en/dxl/mx/mx-28/ |
 | XH430-W350 control table | https://emanual.robotis.com/docs/en/dxl/x/xh430-w350/ |

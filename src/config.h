@@ -43,6 +43,9 @@ namespace HW {
   static constexpr uint8_t  USB_HOST_DP_PIN = 16;
   static constexpr uint8_t  USB_HOST_DM_PIN = 17;
 
+  // RC PWM servo outputs — 6 free GPIO pins, away from UART/I2C/USB host
+  static constexpr uint8_t  RCPWM_PINS[6]  = {10, 11, 12, 13, 18, 19};
+
   // Buzzer / RGB LED — not present on Pico Grove config
   static constexpr int8_t   BUZZER_PIN      = -1;     // -1 = not present
   static constexpr int8_t   LED_R_PIN       = -1;
@@ -91,6 +94,10 @@ namespace HW {
   static constexpr uint8_t  USB_HOST_DP_PIN = 26;
   static constexpr uint8_t  USB_HOST_DM_PIN = 27;
 
+  // RC PWM servo outputs — XIAO RP2040 only exposes GP0-3,6-10,26-29.
+  // GP2,8,9,10,28,29 are the 6 free pins not used by UART/I2C/USB host/buzzer/LED.
+  static constexpr uint8_t  RCPWM_PINS[6]  = {2, 8, 9, 10, 28, 29};
+
   // Expansion board passive buzzer pin
   // Seeed expansion board schematic: buzzer on D6 of the expansion headers
   // which maps to GP3 on XIAO RP2040
@@ -128,10 +135,15 @@ namespace HW {
   static constexpr uint8_t  ENC_SCL_PIN    = 5;
   static constexpr uint8_t  ENC_ADDR       = 0x40;
   static constexpr uint8_t  ENC_8_ADDR     = 0x41;
-  static constexpr uint32_t ENC_I2C_HZ     = 100000UL;
+  static constexpr uint32_t ENC_I2C_HZ     = 400000UL;
 
   static constexpr uint8_t  USB_HOST_DP_PIN = 16;
   static constexpr uint8_t  USB_HOST_DM_PIN = 17;
+
+  // RC PWM servo outputs — GP0/1/2/4/5/16/17 are taken on this board.
+  // GP6,7,8 and GP26,27,28 are free — matches the silkscreen on the
+  // custom RS485 board's 6-channel RC servo header.
+  static constexpr uint8_t  RCPWM_PINS[6]  = {6, 7, 8, 26, 27, 28};
 
   static constexpr int8_t   BUZZER_PIN      = -1;
   static constexpr int8_t   LED_R_PIN       = -1;

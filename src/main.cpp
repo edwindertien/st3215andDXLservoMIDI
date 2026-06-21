@@ -10,6 +10,7 @@
 #include "drivers/servo_bus.h"
 #include "drivers/dxl1_bus.h"
 #include "drivers/dxl2_bus.h"
+#include "drivers/rcpwm_bus.h"
 #include "drivers/oled_ui.h"
 #include "drivers/midi_engine.h"
 #include "drivers/persist.h"
@@ -46,8 +47,9 @@ App      app(appState, (IEncoder&)encoder, ui, &st3215Bus, midiEngine);
 
 IServoBus* busForProtocol(BusProtocol p) {
   switch (p) {
-    case BusProtocol::DXL1: return &dxl1Bus;
-    case BusProtocol::DXL2: return &dxl2Bus;
+    case BusProtocol::DXL1:  return &dxl1Bus;
+    case BusProtocol::DXL2:  return &dxl2Bus;
+    case BusProtocol::RCPWM: return &rcpwmBus;
     case BusProtocol::SC09:
       st3215Bus.setScsMode(true);   // lock reg 48, posMax 1023
       return &st3215Bus;
@@ -304,6 +306,7 @@ void setup() {
   st3215Bus.begin(Serial1, HW::SERVO_BAUD);
   dxl1Bus.begin(Serial1, 57142);   // DXL1 factory default: 2000000/(34+1) = 57142, NOT 57600
   dxl2Bus.begin(Serial1, 57600);   // DXL2 factory default: true 57600
+  rcpwmBus.begin(Serial1, 0);      // ignores both args — configures 6 PWM GPIO instead
 
   usbHost.begin(HW::USB_HOST_DP_PIN, HW::USB_HOST_DM_PIN);
   persist.begin();
@@ -323,6 +326,7 @@ void setup() {
   Serial.println(F("  w = DXL2 Wizard-exact ping @ 1Mbaud (hardcoded CRC 19 4E)"));
   Serial.println(F("  x = DE-pin loopback: toggle GP2 DE, send 0xAA, check RX echo"));
   Serial.println(F("  i = I2C scan on Wire (GP4/GP5) — find actual OLED address"));
+  Serial.println(F("  m = SC09 max-limit write diagnostic (ID=1)"));
   Serial.print(F("[BOOT] oledOk="));    Serial.print(appState.oledOk    ? "YES" : "NO");
   Serial.print(F("  encoderOk="));      Serial.println(appState.encoderOk ? "YES" : "NO");
   if (HW::SERVO_DE_PIN >= 0) {
@@ -551,6 +555,109 @@ void loop() {
       if (!found) Serial.println(F("  (nothing found)"));
       Serial.print(F("Total: ")); Serial.print(found); Serial.println(F(" device(s)"));
       Serial.println(F("Expected: 0x3C=OLED, 0x40=encoder"));
+    }
+    else if (cmd == 'm' || cmd == 'M') {
+      // SC09 max-angle-limit write diagnostic.
+      // Uses the app's currently active servo ID and baud — NOT a hardcoded
+      // ID=1, since the bus may not be at the right baud or the active servo
+      // may have a different ID. This avoids talking into the void.
+      Serial.println(F("\n--- SC09 max-limit write diagnostic ---"));
+
+      if (appState.servoCount == 0 || appState.activeIndex < 0 ||
+          appState.activeIndex >= appState.servoCount) {
+        Serial.println(F("No active servo selected in the app — select one first."));
+      } else {
+        uint8_t id = appState.ids[appState.activeIndex];
+        Serial.print(F("Using active servo ID=")); Serial.println(id);
+        Serial.print(F("Current scanBaudIndex=")); Serial.println(appState.scanBaudIndex);
+
+        bool wasScs = st3215Bus.getScsMode();
+        st3215Bus.setScsMode(true);
+        // Ensure the bus is actually at the servo's current baud —
+        // setScsMode() only changes byte order, NOT the UART baud rate.
+        st3215Bus.setBaud(BAUD_TABLE[appState.scanBaudIndex]);
+        delay(20);
+
+        uint8_t dId; int dMin, dMax, dTorq, dOfs, dMode, dBaud;
+
+        Serial.println(F("Step 0: ping to confirm servo responds at this baud"));
+        bool pingOk = st3215Bus.ping(id);
+        Serial.print(F("  ping=")); Serial.println(pingOk ? "OK" : "FAILED");
+
+        if (!pingOk) {
+          Serial.println(F("Ping failed — servo not responding at current baud."));
+          Serial.println(F("Check Flash Diag / Select Servo screen to confirm baud."));
+        } else {
+          Serial.println(F("Step 0b: check lock register BEFORE unlock"));
+          int lockBefore = st3215Bus.rawReadByte(id, 48);
+          Serial.print(F("  reg48 (lock) before unlock = ")); Serial.println(lockBefore);
+
+          Serial.println(F("Step 0c: manually unlock and verify"));
+          int unlockResult = st3215Bus.rawWriteByte(id, 48, 0);
+          Serial.print(F("  writeByte(48,0) returned: ")); Serial.println(unlockResult);
+          delay(20);
+          int lockAfterUnlock = st3215Bus.rawReadByte(id, 48);
+          Serial.print(F("  reg48 (lock) after unlock = ")); Serial.println(lockAfterUnlock);
+
+          Serial.println(F("Step 1: read current min/max"));
+          bool ok1 = st3215Bus.loadConfig(id, dId, dMin, dMax, dTorq, dOfs, dMode, dBaud);
+          Serial.print(F("  ok=")); Serial.print(ok1);
+          Serial.print(F("  min=")); Serial.print(dMin);
+          Serial.print(F("  max=")); Serial.println(dMax);
+
+          Serial.println(F("Step 2: read current actual position"));
+          int curPos = st3215Bus.readPosition(id);
+          Serial.print(F("  position=")); Serial.println(curPos);
+
+          Serial.println(F("Step 3: write min=100, max=900 (via saveMinMax/writeWord)"));
+          bool okWrite = st3215Bus.saveMinMax(id, 100, 900);
+          Serial.print(F("  saveMinMax() returned: ")); Serial.println(okWrite ? "true" : "false");
+
+          delay(50);
+
+          Serial.println(F("Step 3b: re-unlock and write max via RAW byte writes (bypass writeWord)"));
+          st3215Bus.rawWriteByte(id, 48, 0); // unlock
+          delay(20);
+          // End=1 (SCS big-endian): DataL=900>>8=3 goes to reg11, DataH=900&0xFF=132 goes to reg12
+          int w11 = st3215Bus.rawWriteByte(id, 11, 3);
+          delay(10);
+          int verify11early = st3215Bus.rawReadByte(id, 11);
+          Serial.print(F("  reg11 immediately after writing it = ")); Serial.println(verify11early);
+          int w12 = st3215Bus.rawWriteByte(id, 12, 132);
+          delay(10);
+          st3215Bus.rawWriteByte(id, 48, 1); // relock
+          delay(20);
+          Serial.print(F("  write reg11=3 returned: ")); Serial.println(w11);
+          Serial.print(F("  write reg12=132 returned: ")); Serial.println(w12);
+          int verify11 = st3215Bus.rawReadByte(id, 11);
+          int verify12 = st3215Bus.rawReadByte(id, 12);
+          Serial.print(F("  readback reg11=")); Serial.print(verify11);
+          Serial.print(F("  reg12=")); Serial.println(verify12);
+
+          Serial.println(F("Step 4: read back min/max immediately after write"));
+          bool ok2 = st3215Bus.loadConfig(id, dId, dMin, dMax, dTorq, dOfs, dMode, dBaud);
+          Serial.print(F("  ok=")); Serial.print(ok2);
+          Serial.print(F("  min=")); Serial.print(dMin);
+          Serial.print(F("  max=")); Serial.println(dMax);
+
+          Serial.println(F("Step 5: raw register read (bypass readWord helper)"));
+          int rawMinL = st3215Bus.rawReadByte(id, 9);
+          int rawMinH = st3215Bus.rawReadByte(id, 10);
+          int rawMaxL = st3215Bus.rawReadByte(id, 11);
+          int rawMaxH = st3215Bus.rawReadByte(id, 12);
+          Serial.print(F("  reg9 (minL)=")); Serial.print(rawMinL);
+          Serial.print(F("  reg10(minH)=")); Serial.print(rawMinH);
+          Serial.print(F("  reg11(maxL)=")); Serial.print(rawMaxL);
+          Serial.print(F("  reg12(maxH)=")); Serial.println(rawMaxH);
+
+          Serial.println(F("Step 6: read lock register (should be 1=locked after save)"));
+          int lockVal = st3215Bus.rawReadByte(id, 48);
+          Serial.print(F("  reg48 (lock)=")); Serial.println(lockVal);
+        }
+
+        st3215Bus.setScsMode(wasScs);
+      }
+      Serial.println(F("--- diagnostic complete ---"));
     }
   }
 

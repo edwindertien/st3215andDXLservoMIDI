@@ -3,6 +3,7 @@
 #include "../drivers/servo_bus.h"
 #include "../drivers/dxl1_bus.h"
 #include "../drivers/dxl2_bus.h"
+#include "../drivers/rcpwm_bus.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -961,7 +962,14 @@ void App::handleHomeInput(int delta, bool shortPress, bool longPress) {
   if (!shortPress) return;
 
   switch (_app.menuIndex) {
-    case 0: enterScreen(ScreenId::ScanBaudSelect, _app.scanBaudIndex, false); break;
+    case 0:
+      if (_app.protocol == BusProtocol::RCPWM) {
+        if (_app.oledOk) _ui.splash("Scan Bus", "Not needed", "RC PWM: 6ch fixed");
+        delay(900);
+        break;
+      }
+      enterScreen(ScreenId::ScanBaudSelect, _app.scanBaudIndex, false);
+      break;
     case 1: enterScreen(ScreenId::SelectServo, _app.activeIndex, false);       break;
     case 2:
       // DXL2: always start Live Control with torque OFF — the XH/XM series
@@ -980,6 +988,11 @@ void App::handleHomeInput(int delta, bool shortPress, bool longPress) {
       enterScreen(ScreenId::ServoInfo, 0, false);
       break;
     case 4:
+      if (_app.protocol == BusProtocol::RCPWM) {
+        if (_app.oledOk) _ui.splash("Configure", "Not available", "RC PWM: no EEPROM");
+        delay(900);
+        break;
+      }
       // DXL2: torque must be OFF to write EEPROM — do it automatically and
       // show a brief notice so the user knows why the servo goes limp.
       if (_app.protocol == BusProtocol::DXL2 && hasActiveServo()) {
@@ -992,7 +1005,14 @@ void App::handleHomeInput(int delta, bool shortPress, bool longPress) {
       }
       enterScreen(ScreenId::ConfigMenu, 0, false);
       break;
-    case 5: enterScreen(ScreenId::ConfirmSave, 0, false);                      break;
+    case 5:
+      if (_app.protocol == BusProtocol::RCPWM) {
+        if (_app.oledOk) _ui.splash("Save Changes", "Not needed", "RC PWM: no EEPROM");
+        delay(900);
+        break;
+      }
+      enterScreen(ScreenId::ConfirmSave, 0, false);
+      break;
     case 6:
       // Enter MIDI mode: rebuild bindings then go to Setup
       rebuildMidiBindings();
@@ -1412,6 +1432,27 @@ void App::handleSelectProtocolInput(int delta, bool shortPress, bool longPress) 
       IServoBus* newBus = busForProtocol(chosen);
       setBus(newBus);
       markDirty();
+
+      if (chosen == BusProtocol::RCPWM) {
+        // RC PWM: no bus, no scan — all 6 channels always present.
+        // Populate the servo list immediately and load the active servo.
+        int lastId;
+        _app.servoCount = _bus->scan(_app.ids, RCPWM_CH_COUNT, lastId);
+        _app.activeIndex = 0;
+        loadActiveServoRuntime();
+        loadStagedConfigFromActive();
+        // RC servos have no EEPROM risk — attach (torque on) all channels
+        // immediately so Live Control and MIDI work without an extra step.
+        _app.torqueEnabled = true;
+        for (uint8_t s = 0; s < _app.servoCount; ++s)
+          _bus->torqueEnable(_app.ids[s], true);
+        if (_app.oledOk)
+          _ui.splash("Protocol", _bus->protocolName(), "6ch ready");
+        delay(800);
+        enterScreen(ScreenId::Home, 0, false);
+        return;
+      }
+
       // Set default baud for new protocol and prompt a scan
       int cnt; const uint32_t* tbl = activeBaudTable(cnt);
       _app.scanBaudIndex = 0;
@@ -1480,7 +1521,8 @@ void App::render() {
                           _app.targetPos, _app.actualPos,
                           _app.torqueEnabled,
                           _app.cfg.minLimit, _app.cfg.maxLimit,
-                          _bus->posMax(),
+                          _bus->posMin(), _bus->posMax(),
+                          (_app.protocol == BusProtocol::RCPWM) ? 180.0f : 360.0f,
                           _app.speed, _app.acc,
                           _app.menuIndex, _app.editing);
       break;

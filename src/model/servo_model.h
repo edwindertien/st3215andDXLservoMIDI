@@ -41,13 +41,15 @@ enum class BusProtocol : uint8_t {
   DXL1   = 1,   // Dynamixel Protocol 1.0 (MX series RS-485)
   DXL2   = 2,   // Dynamixel Protocol 2.0 (XM/XH/XD series RS-485)
   SC09   = 3,   // Feetech SCS protocol (SC09, SC15, SC16 — 10-bit, lock reg 48)
+  RCPWM  = 4,   // Standard RC PWM servos, 6 fixed GPIO channels, no bus
 };
-static constexpr int BUS_PROTOCOL_COUNT = 4;
+static constexpr int BUS_PROTOCOL_COUNT = 5;
 static constexpr const char* BUS_PROTOCOL_NAMES[BUS_PROTOCOL_COUNT] = {
   "ST3215 / STS",
   "DXL MX (P1.0)",
   "DXL X  (P2.0)",
-  "SC09   / SCS"
+  "SC09   / SCS",
+  "RC PWM (6ch)"
 };
 
 enum class MenuItemType : uint8_t { Action, Toggle, Integer, Choice, Back };

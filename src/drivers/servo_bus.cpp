@@ -167,13 +167,44 @@ static constexpr uint8_t SCS_LOCK_REG = 48;
 
 bool ST3215Bus::saveId(uint8_t currentId, uint8_t newId) {
   UNLOCK(currentId);
+  if (_scsMode) delay(10);
   int ok = _servo.writeByte(currentId, SMS_STS_ID, newId);
+  if (_scsMode) delay(10);
   RELOCK(currentId);
   return ok >= 0;
 }
 
 bool ST3215Bus::saveMinMax(uint8_t id, int minV, int maxV) {
   UNLOCK(id);
+
+  if (_scsMode) {
+    // SC09: writeWord()'s single 2-byte packet write does not reliably
+    // commit to EEPROM for these registers — confirmed by diagnostic:
+    // the same L/H byte pair written as two separate single-byte writes
+    // persists correctly, while one 2-byte writeWord() call silently
+    // fails despite returning a successful Ack. Use byte writes for both
+    // min and max here for consistency and reliability.
+    delay(10);
+    uint16_t minWire = (uint16_t)minV; // End=1 byte order, but writeByte is raw — compute manually
+    uint16_t maxWire = (uint16_t)maxV;
+    uint8_t minL = (uint8_t)(minWire >> 8);   // End=1: L = high byte of value
+    uint8_t minH = (uint8_t)(minWire & 0xFF); // End=1: H = low byte of value
+    uint8_t maxL = (uint8_t)(maxWire >> 8);
+    uint8_t maxH = (uint8_t)(maxWire & 0xFF);
+
+    int a1 = _servo.writeByte(id, SMS_STS_MIN_ANGLE_LIMIT_L,     minL);
+    delay(10);
+    int a2 = _servo.writeByte(id, SMS_STS_MIN_ANGLE_LIMIT_L + 1, minH);
+    delay(10);
+    int b1 = _servo.writeByte(id, SMS_STS_MAX_ANGLE_LIMIT_L,     maxL);
+    delay(10);
+    int b2 = _servo.writeByte(id, SMS_STS_MAX_ANGLE_LIMIT_L + 1, maxH);
+    delay(10);
+
+    RELOCK(id);
+    return (a1 >= 0 && a2 >= 0 && b1 >= 0 && b2 >= 0);
+  }
+
   int a = _servo.writeWord(id, SMS_STS_MIN_ANGLE_LIMIT_L, minV);
   int b = _servo.writeWord(id, SMS_STS_MAX_ANGLE_LIMIT_L, maxV);
   RELOCK(id);
@@ -189,6 +220,7 @@ bool ST3215Bus::saveTorqueLimit(uint8_t id, int limit) {
 }
 
 bool ST3215Bus::saveCenterOffset(uint8_t id, int offset) {
+  if (_scsMode) return true; // SC09 has no center offset register — silently skip
   uint16_t wire = (offset >= 0) ? (uint16_t)offset : (uint16_t)(offset + 4096);
   UNLOCK(id);
   int ok = _servo.writeWord(id, SMS_STS_OFS_L, wire);
@@ -207,7 +239,9 @@ bool ST3215Bus::saveMode(uint8_t id, int mode) {
 bool ST3215Bus::saveBaud(uint8_t id, int baudIndex) {
   if (baudIndex < 0 || baudIndex >= 8) return false;
   UNLOCK(id);
+  if (_scsMode) delay(10);
   int ok = _servo.writeByte(id, SMS_STS_BAUD_RATE, (uint8_t)baudIndex);
+  if (_scsMode) delay(10);
   RELOCK(id);
   return ok >= 0;
 }

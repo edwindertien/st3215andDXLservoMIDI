@@ -97,6 +97,10 @@ public:
   int posMin() const override { return 0; }
   int posMax() const override { return _scsMode ? 1023 : 4095; }
 
+  // Diagnostic helper — direct register byte read, bypasses any app-level logic.
+  int rawReadByte(uint8_t id, uint8_t reg) { return _servo.readByte(id, reg); }
+  int rawWriteByte(uint8_t id, uint8_t reg, uint8_t val) { return _servo.writeByte(id, reg, val); }
+
   // Switch between STS (ST3215, default) and SCS (SC09) sub-protocol.
   // Affects EEPROM lock register address and position range only.
   void setScsMode(bool scs); // implementation in servo_bus.cpp — also sets _servo.End

@@ -4,7 +4,7 @@
 #include "../config.h"
 
 static constexpr uint32_t PERSIST_MAGIC   = 0x53543332;
-static constexpr uint8_t  PERSIST_VERSION = 11; // bumped: added scsMode
+static constexpr uint8_t  PERSIST_VERSION = 12; // bumped: added RCPWM protocol
 static constexpr char     PERSIST_PATH[]  = "/config.bin";
 
 struct PersistedMidiBinding {

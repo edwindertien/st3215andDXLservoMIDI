@@ -102,15 +102,16 @@ void OledUi::drawPositionBar(int targetPos,
                              int actualPos,
                              int minLimit,
                              int maxLimit,
+                             int posMin,
                              int posMax,
                              int x,
                              int y,
                              int w,
                              int h) {
-  if (minLimit < 0) minLimit = 0;
+  if (minLimit < posMin) minLimit = posMin;
   if (maxLimit > posMax) maxLimit = posMax;
   if (minLimit > maxLimit) {
-    minLimit = 0;
+    minLimit = posMin;
     maxLimit = posMax;
   }
 
@@ -120,8 +121,8 @@ void OledUi::drawPositionBar(int targetPos,
   int innerX1 = x + w - 2;
   int innerW  = innerX1 - innerX0 + 1;
 
-  int minX = map(minLimit, 0, posMax, innerX0, innerX1);
-  int maxX = map(maxLimit, 0, posMax, innerX0, innerX1);
+  int minX = map(minLimit, posMin, posMax, innerX0, innerX1);
+  int maxX = map(maxLimit, posMin, posMax, innerX0, innerX1);
 
   // Hatch unusable left region
   for (int xx = innerX0; xx < minX; ++xx) {
@@ -142,12 +143,12 @@ void OledUi::drawPositionBar(int targetPos,
   _display.drawLine(maxX, y + 1, maxX, y + h - 2, _OLED_COLOR_ON);
 
   // Target marker: thin line
-  int tgtX = map(targetPos, 0, posMax, innerX0, innerX1);
+  int tgtX = map(targetPos, posMin, posMax, innerX0, innerX1);
   _display.drawLine(tgtX, y + 1, tgtX, y + h - 2, _OLED_COLOR_ON);
 
   // Actual marker: filled block
   if (actualPos >= 0) {
-    int actX = map(actualPos, 0, posMax, innerX0, innerX1);
+    int actX = map(actualPos, posMin, posMax, innerX0, innerX1);
     int boxW = 3;
     int boxX = actX - (boxW / 2);
     if (boxX < innerX0) boxX = innerX0;
@@ -216,7 +217,9 @@ void OledUi::drawLiveControl(uint8_t servoId,
                              bool torqueEnabled,
                              int minLimit,
                              int maxLimit,
+                             int posMin,
                              int posMax,
+                             float angleSpan,
                              int speed,
                              int acc,
                              int selected,
@@ -237,6 +240,9 @@ void OledUi::drawLiveControl(uint8_t servoId,
   const int ySpd = 33;
   const int yBar = 44;
 
+  int posRange = posMax - posMin;
+  if (posRange <= 0) posRange = 1; // guard against div-by-zero
+
   // --- Row 0: Torque toggle | actual angle (display-only) ---
   if (selected == 0) drawSelectionMarker(yTrq, editing);
   _display.setCursor(10, yTrq);
@@ -245,7 +251,7 @@ void OledUi::drawLiveControl(uint8_t servoId,
 
   if (actualPos >= 0) {
     char abuf[8];
-    float adeg = 360.0f * ((float)actualPos / (float)posMax);
+    float adeg = angleSpan * ((float)(actualPos - posMin) / (float)posRange);
     snprintf(abuf, sizeof(abuf), "%.1f", adeg);
     // Each char is 6px wide at textSize=1; degree symbol counts as one char
     int strW = ((int)strlen(abuf) + 1) * 6;
@@ -265,7 +271,7 @@ void OledUi::drawLiveControl(uint8_t servoId,
 
   {
     char tbuf[8];
-    float tdeg = 360.0f * ((float)targetPos / (float)posMax);
+    float tdeg = angleSpan * ((float)(targetPos - posMin) / (float)posRange);
     snprintf(tbuf, sizeof(tbuf), "%.1f", tdeg);
     int strW = ((int)strlen(tbuf) + 1) * 6;
     _display.setCursor(127 - strW, yTgt);
@@ -288,7 +294,7 @@ void OledUi::drawLiveControl(uint8_t servoId,
   _display.print(acc);
 
   // --- Position bar ---
-  drawPositionBar(targetPos, actualPos, minLimit, maxLimit, posMax, 0, yBar, 128, 9);
+  drawPositionBar(targetPos, actualPos, minLimit, maxLimit, posMin, posMax, 0, yBar, 128, 9);
 
   footer(editing ? "Turn=chg Short=OK Long=cancel" : "Short=edit Long=back");
   _display.display();
@@ -1009,11 +1015,19 @@ void OledUi::drawPersistDiag(const PersistDiag& d) {
 void OledUi::drawSelectProtocol(int activeProtocol, int cursor) {
   header("Select Protocol");
 
-  const int y0   = 11;
-  const int step = 10; // 10px step fits 5 protocols between header(y=10) and footer(y=54)
+  const int y0   = 12;
+  const int step = 10;
 
-  for (int i = 0; i < BUS_PROTOCOL_COUNT; ++i) {
-    int y = y0 + i * step;
+  // Scroll window: show 4 rows max, matching drawMenu()'s pattern.
+  // Keeps the last visible row clear of the footer regardless of list length,
+  // and headroom for future protocols beyond 5.
+  int start = 0;
+  if (cursor >= 4) start = cursor - 3;
+
+  for (int row = 0; row < 4; ++row) {
+    int i = start + row;
+    if (i >= BUS_PROTOCOL_COUNT) break;
+    int y = y0 + row * step;
     bool isCursor = (i == cursor);
     bool isActive = (i == activeProtocol);
 

@@ -2,6 +2,8 @@
 
 A standalone servo configuration, control, and MIDI integration tool for **Waveshare ST3215**, **Feetech SC09 (SCS)**, **Dynamixel MX series (Protocol 1.0)**, **Dynamixel X series (Protocol 2.0)** serial bus servos, and **standard RC hobby servos** via 6-channel PWM.
 
+![system](images/system.jpg)
+
 Built on a **Raspberry Pi Pico (RP2040)** with a rotary encoder knob, OLED display, and USB MIDI — no PC required once flashed.
 
 Designed for robotics and kinetic art: record arm motion as MIDI into a DAW, then play it back on the arm with full bidirectional CC integration.
